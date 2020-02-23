@@ -4,6 +4,7 @@
 #define MESSAGE_CENTER_EVENTQUEUE_H
 
 #include "collectionhelper.h"
+#include "streamhelper.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -28,8 +29,18 @@ typedef std::function<void(int id, Message* message)> ObserverCallbackFunc;
 struct ObserverDescriptor
 {
     ObserverCallback* callback;
-    ObserverCallbackMethod callbackMethod;
+    ObserverCallbackMethod callbackMethod;  // Uses Observer::_some_method(int id, Message* messsage) callback signature. Requires observerInstance to be defined.
     ObserverCallbackFunc callbackFunc;
+
+    Observer* observerInstance;             // Used to hold class instance for callbackMethod
+};
+
+// Base class for all observer listeners. Derived class can implement method with any name
+// But signatures shoukd be exactly void _custom_method_(int id, Message* message)
+struct Observer
+{
+public:
+    //virtual void ObserverCallbackMethod(int id, Message* message) = 0;
 };
 
 // Topic types
@@ -91,7 +102,7 @@ public:
 // Public methods
 public:
     int AddObserver(std::string& topic, ObserverCallback callback);
-    int AddObserver(std::string& topic, ObserverCallbackMethod callback);
+    int AddObserver(std::string& topic, Observer* instance, ObserverCallbackMethod callback);
     int AddObserver(std::string& topic, ObserverCallbackFunc callback);
     int AddObserver(std::string& topic, ObserverDescriptor* observer);
 
@@ -104,8 +115,8 @@ public:
     void Post(std::string topic, void* obj = nullptr);
 
 protected:
-    void Get();
-    void Dispatch(int id);
+    Message* Get();
+    void Dispatch(int id, Message* message);
 
     ObserverVectorPtr GetObservers(int id);
 
@@ -138,6 +149,8 @@ public:
     using EventQueue::m_messageQueue;
 
     using EventQueue::GetObservers;
+    using EventQueue::Get;
+    using EventQueue::Dispatch;
 };
 #endif // _CODE_UNDER_TEST
 

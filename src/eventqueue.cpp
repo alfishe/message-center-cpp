@@ -70,10 +70,30 @@ int EventQueue::AddObserver(std::string& topic, ObserverCallback callback)
     return AddObserver(topic, observer);
 }
 
-int EventQueue::AddObserver(std::string& topic, ObserverCallbackMethod callback)
+// Add class method as observer
+// 1. Class should be derived from Observer
+// 2. Method signature should be void method(int id, Message* message);
+// Example:
+// class TestObservers_ClassMethod_class : public Observer
+// {
+// public:
+//     void ObserverTestMethod(int id, Message* message) { str::cout << "It works!" << std::endl; }
+// }
+//
+// EventQueue queue;
+// // Register topics... other prep. actions
+//
+// TestObservers_ClassMethod_class observerDerivedInstance;
+// Observer* observerInstance = static_cast<Observer*>(&observerDerivedInstance);
+// ObserverCallbackMethod callback = static_cast<ObserverCallbackMethod>(&TestObservers_ClassMethod_class::ObserverTestMethod);
+//
+// queue.AddObserver(topic, observerInstance, callback);
+int EventQueue::AddObserver(std::string& topic, Observer* instance, ObserverCallbackMethod callback)
 {
     ObserverDescriptor* observer = new ObserverDescriptor();
     observer->callbackMethod = callback;
+    observer->observerInstance = instance;
+
     return AddObserver(topic, observer);
 }
 
@@ -186,7 +206,7 @@ void EventQueue::Post(int id, void* obj)
         std::unique_lock<std::mutex> lock(m_mutexMessages);
 
         Message* message = new Message(id, obj);
-        m_messageQueue.push_front(message);
+        m_messageQueue.push_back(message);
         lock.unlock();
 
         m_cvEvents.notify_one();
@@ -211,6 +231,50 @@ ObserverVectorPtr EventQueue::GetObservers(int id)
     }
 
     return result;
+}
+
+// Retrieve topmost message in Message Queue
+Message* EventQueue::Get()
+{
+    Message* result = nullptr;
+
+    std::lock_guard<std::mutex> lock(m_mutexMessages);
+    if (!m_messageQueue.empty())
+    {
+        result = m_messageQueue.front();
+        m_messageQueue.pop_front();
+    }
+
+    return result;
+}
+
+// Dispatch message to all subscribers of the topic
+void EventQueue::Dispatch(int id, Message* message)
+{
+    if (message == nullptr)
+        return;
+
+    ObserverVectorPtr observers = GetObservers(id);
+
+    if (observers != nullptr)
+    {
+        for (auto it : *observers)
+        {
+            if (it->callback != nullptr)
+            {
+                (*it->callback)(id, message);
+            }
+            else if (it->callbackMethod != nullptr && it->observerInstance != nullptr)
+            {
+                ObserverCallbackMethod callbackMethod = it->callbackMethod;
+                (it->observerInstance->*callbackMethod)(id, message);
+            }
+            else if (it->callbackFunc != nullptr)
+            {
+                (it->callbackFunc)(id, message);
+            }
+        }
+    }
 }
 
 #ifdef _DEBUG
@@ -261,14 +325,17 @@ std::string EventQueue::DumpObservers()
 
                 if (observer->callback != nullptr)
                 {
-                    ss << "callback: " << observer->callback << std::endl;
+                    using namespace function_display;
+                    ss << "callback: " <<  observer->callback << std::endl;
                 }
                 else if (observer->callbackFunc != nullptr)
                 {
-                    ss << "callbackFunc: " << &observer->callbackFunc << std::endl;
+                    using namespace lambda_display;
+                    ss << "callbackFunc: " << observer->callbackFunc << std::endl;
                 }
                 else if (observer->callbackMethod != nullptr)
                 {
+                    using namespace class_method_display;
                     ss << "callbackMethod: " << observer->callbackMethod << std::endl;
                 }
                 else
