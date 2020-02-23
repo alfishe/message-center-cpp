@@ -197,8 +197,12 @@ TEST_F(EventQueue_Test, TestObservers_Callback)
 
     for (int i = 0; i < queue.m_messageQueue.size(); i++)
     {
-        Message* message = queue.Get();
+        int messagesBeforeGet = queue.m_messageQueue.size();
+        Message* message = queue.GetMessage();
+        int messagesAfterGet = queue.m_messageQueue.size();
+
         EXPECT_NE(message, nullptr);
+        EXPECT_EQ(messagesAfterGet + 1, messagesBeforeGet);
 
 #ifdef _DEBUG
         std::cout << "[" << i << "] " << "Starting dispatch message for tid:" << message->tid << std::endl;
@@ -268,7 +272,7 @@ TEST_F(EventQueue_Test, TestObservers_ClassMethod)
 
     for (int i = 0; i < queue.m_messageQueue.size(); i++)
     {
-        Message* message = queue.Get();
+        Message* message = queue.GetMessage();
         EXPECT_NE(message, nullptr);
 
 #ifdef _DEBUG
@@ -332,7 +336,7 @@ TEST_F(EventQueue_Test, TestObservers_Lambda)
 
     for (int i = 0; i < queue.m_messageQueue.size(); i++)
     {
-        Message* message = queue.Get();
+        Message* message = queue.GetMessage();
         EXPECT_NE(message, nullptr);
 
 #ifdef _DEBUG

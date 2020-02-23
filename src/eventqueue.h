@@ -115,7 +115,7 @@ public:
     void Post(std::string topic, void* obj = nullptr);
 
 protected:
-    Message* Get();
+    Message* GetMessage();
     void Dispatch(int id, Message* message);
 
     ObserverVectorPtr GetObservers(int id);
@@ -149,7 +149,7 @@ public:
     using EventQueue::m_messageQueue;
 
     using EventQueue::GetObservers;
-    using EventQueue::Get;
+    using EventQueue::GetMessage;
     using EventQueue::Dispatch;
 };
 #endif // _CODE_UNDER_TEST
