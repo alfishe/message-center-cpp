@@ -8,10 +8,7 @@ EventQueue::EventQueue()
 
 EventQueue::~EventQueue()
 {
-    if (m_initialized)
-    {
-        dispose();
-    }
+    dispose();
 }
 
 bool EventQueue::init()
@@ -25,16 +22,90 @@ bool EventQueue::init()
 
 void EventQueue::dispose()
 {
-    //top();
+    // Cleanup message queue
+    if (m_messageQueue.size() > 0)
+    {
+        std::lock_guard<std::mutex> lock(m_mutexMessages);
+
+        for (auto it : m_messageQueue)
+        {
+            if (it != nullptr)
+            {
+                delete it;
+            }
+        }
+
+        m_messageQueue.clear();
+    }
+
+    // Cleanup observers
+    if (m_topicObservers.size() > 0)
+    {
+        std::lock_guard<std::mutex> lock(m_mutexObservers);
+
+        for (auto it : m_topicObservers)
+        {
+            if (it.second != nullptr)
+            {
+                for (auto observerDescriptor : *it.second)
+                {
+                    if (observerDescriptor != nullptr)
+                    {
+                        delete observerDescriptor;
+                    }
+                }
+
+                it.second->clear();
+            }
+        }
+
+        m_topicObservers.clear();
+    }
 }
 
-int EventQueue::AddObserver(std::string& topic)
+int EventQueue::AddObserver(std::string& topic, ObserverCallback callback)
 {
+    ObserverDescriptor* observer = new ObserverDescriptor();
+    observer->callback = callback;
+    return AddObserver(topic, observer);
+}
+
+int EventQueue::AddObserver(std::string& topic, ObserverCallbackMethod callback)
+{
+    ObserverDescriptor* observer = new ObserverDescriptor();
+    observer->callbackMethod = callback;
+    return AddObserver(topic, observer);
+}
+
+int EventQueue::AddObserver(std::string& topic, ObserverCallbackFunc callback)
+{
+    ObserverDescriptor* observer = new ObserverDescriptor();
+    observer->callbackFunc = callback;
+    return AddObserver(topic, observer);
+}
+
+int EventQueue::AddObserver(std::string& topic, ObserverDescriptor* observer)
+{
+    // Register Topic (or get TopicID if already registered)
     int result = RegisterTopic(topic);
 
     if (result >= 0)
     {
+        // Lock parallel threads to access (active till return from method and lock destruction)
+        std::lock_guard<std::mutex> lock(m_mutexObservers);
 
+        ObserverVectorPtr observers = GetObservers(result);
+        if (observers == nullptr)
+        {
+            // Observers list not created yet - create vector and register it in topic-observers map collection
+            observers = new ObserversVector();
+            m_topicObservers.insert( {result, observers });
+        }
+
+        if (observers != nullptr)
+        {
+            observers->push_back(observer);
+        }
     }
 
     return result;
@@ -72,6 +143,7 @@ int EventQueue::RegisterTopic(std::string& topic)
             {
                 // Registering new ID
                 m_topicsResolveMap.insert({ topic, m_topicMax });
+                m_topics[m_topicMax] = topic;
 
                 result = m_topicMax;
                 m_topicMax++;
@@ -87,8 +159,168 @@ int EventQueue::RegisterTopic(std::string& topic)
     return result;
 }
 
+std::string EventQueue::GetTopicByID(int id)
+{
+    std::string result;
+
+    if (id > 0 && id < MAX_TOPICS)
+    {
+        result = m_topics[id];
+    }
+
+    return result;
+}
+
 void EventQueue::ClearTopics()
 {
     m_topicsResolveMap.clear();
+    memset(m_topics, 0, sizeof m_topics);
     m_topicMax = 0;
 }
+
+void EventQueue::Post(int id, void* obj)
+{
+    if (id >= 0)
+    {
+        // Lock parallel threads to access (active till return from method and lock destruction)
+        std::unique_lock<std::mutex> lock(m_mutexMessages);
+
+        Message* message = new Message(id, obj);
+        m_messageQueue.push_front(message);
+        lock.unlock();
+
+        m_cvEvents.notify_one();
+    }
+}
+
+void EventQueue::Post(std::string topic, void* obj)
+{
+    int id = ResolveTopic(topic);
+    Post(id, obj);
+}
+
+// Lookup for observer list for topic with <id>
+// Returns: ObserverVectorPtr aka vector<Observer*>
+ObserverVectorPtr EventQueue::GetObservers(int id)
+{
+    ObserverVectorPtr result = nullptr;
+
+    if (key_exists(m_topicObservers, id))
+    {
+        result = m_topicObservers[id];
+    }
+
+    return result;
+}
+
+#ifdef _DEBUG
+
+#include <sstream>
+
+std::string EventQueue::DumpTopics()
+{
+    std::string result;
+    std::stringstream ss;
+
+    ss << "Topics map contains: " << m_topicsResolveMap.size();
+    if (m_topicsResolveMap.size() > 0)
+        ss << std::endl;
+
+    for (auto topic : m_topicsResolveMap)
+    {
+        ss << "  tid: " << topic.second << "; topic:'" << topic.first << '\'';
+        ss << std::endl;
+    }
+
+    if (m_topicsResolveMap.size() > 0)
+        ss << std::endl;
+
+    result = ss.str();
+    return result;
+}
+std::string EventQueue::DumpObservers()
+{
+    std::string result;
+    std::stringstream ss;
+
+    ss << "Observers registered for: " << m_topicObservers.size() << " topics";
+    if (m_topicsResolveMap.size() > 0)
+        ss << std::endl;
+
+    for (auto topic : m_topicObservers)
+    {
+        ss << "tid:" << topic.first;
+        if (topic.second != nullptr)
+        {
+            ss << " has " << topic.second->size() << " observers" << std::endl;
+
+            int callbackCounter = 0;
+            for (auto observer : *topic.second)
+            {
+                ss << "  [" << callbackCounter << "] ";
+
+                if (observer->callback != nullptr)
+                {
+                    ss << "callback: " << observer->callback << std::endl;
+                }
+                else if (observer->callbackFunc != nullptr)
+                {
+                    ss << "callbackFunc: " << &observer->callbackFunc << std::endl;
+                }
+                else if (observer->callbackMethod != nullptr)
+                {
+                    ss << "callbackMethod: " << observer->callbackMethod << std::endl;
+                }
+                else
+                {
+                    ss << "No callbacks registered" << std::endl;
+                }
+
+                callbackCounter++;
+            }
+        }
+        else
+        {
+            ss << " has no observers" << std::endl;
+        }
+    }
+
+    if (m_topicsResolveMap.size() > 0)
+        ss << std::endl;
+
+    result = ss.str();
+    return result;
+}
+
+std::string EventQueue::DumpMessageQueue()
+{
+    // Lock parallel threads to access (unique_lock allows arbitrary lock/unlock)
+    std::lock_guard<std::mutex> lock(m_mutexMessages);
+
+    return DumpMessageQueueNoLock();
+}
+
+std::string EventQueue::DumpMessageQueueNoLock()
+{
+    std::string result;
+
+    std::stringstream ss;
+
+    ss << "Message queue contains: " << m_messageQueue.size() << " messages";
+    if (m_messageQueue.size() > 0)
+        ss << std::endl;
+
+    for (auto message : m_messageQueue)
+    {
+        ss << "  tid: " << message->tid << "; obj*: " << message->obj;
+        ss << std::endl;
+    }
+
+    if (m_messageQueue.size() > 0)
+        ss << std::endl;
+
+    result = ss.str();
+    return result;
+}
+
+#endif // _DEBUG

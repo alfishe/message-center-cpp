@@ -37,6 +37,12 @@ set(SOURCES "${SOURCES};${ROOT_SRC}")
 # Compile tests into executable
 add_executable(${PROJECT_NAME} ${SOURCES})
 
+# Declare _DEBUG symbol for compiler
+if (CMAKE_BUILD_TYPE MATCHES Debug)
+    message(STATUS "CMAKE_BUILD_TYPE:${CMAKE_BUILD_TYPE} - defining '_DEBUG'")
+    target_compile_definitions(${PROJECT_NAME} PRIVATE _DEBUG)
+endif (CMAKE_BUILD_TYPE MATCHES DEBUG)
+
 # Enable test wrappers in code
 target_compile_definitions(${PROJECT_NAME} PRIVATE _CODE_UNDER_TEST)
 

@@ -26,5 +26,10 @@ EXCLUDE_FILES_FROM_DIR_IN_LIST("${SOURCES}" "/build/" FALSE OUTVAR SOURCES) # Ex
 # Compile example into executable
 add_executable(${PROJECT_NAME} ${SOURCES})
 
+# Declare _DEBUG symbol for compiler
+if (CMAKE_BUILD_TYPE MATCHES DEBUG)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE _DEBUG)
+endif (CMAKE_BUILD_TYPE MATCHES DEBUG)
+
 # Link with following libraries
 target_link_libraries(${PROJECT_NAME} pthread)
