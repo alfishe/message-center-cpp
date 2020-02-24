@@ -17,8 +17,6 @@
 #include <vector>
 
 // MAX_TOPICS - By default we're allocating descriptor table for 1024 topics
-// Override example:
-// auto queue = new EventQueue<512>(); - That will force to allocate only 512 entries descriptor table
 constexpr unsigned MAX_TOPICS = 1024;
 
 struct Observer;
@@ -36,7 +34,7 @@ struct ObserverDescriptor
 };
 
 // Base class for all observer listeners. Derived class can implement method with any name
-// But signatures shoukd be exactly void _custom_method_(int id, Message* message)
+// But signatures should be exactly void _custom_method_(int id, Message* message)
 struct Observer
 {
 public:

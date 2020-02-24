@@ -131,7 +131,7 @@ TEST_F(EventQueue_Test, Register_1k_ObserversFor_100_Topics)
     EventQueueCUT queue;
     for (int topics = 0; topics < TOPIC_COUNT; topics ++)
     {
-        snprintf(buffer, sizeof(buffer), "topic_%03d\0", topics);
+        snprintf(buffer, sizeof(buffer), "topic_%03d", topics);
         std::string topic(buffer);
 
         for (int i = 0; i < OBSERVERS_COUNT; i++)
@@ -165,7 +165,7 @@ TEST_F(EventQueue_Test, TestObservers_Callback)
     EventQueueCUT queue;
     for (int topics = 0; topics < TOPIC_COUNT; topics ++)
     {
-        snprintf(buffer, sizeof(buffer), "topic_%03d\0", topics);
+        snprintf(buffer, sizeof(buffer), "topic_%03d", topics);
         std::string topic(buffer);
 
         for (int i = 0; i < OBSERVERS_COUNT; i++)
@@ -238,7 +238,7 @@ TEST_F(EventQueue_Test, TestObservers_ClassMethod)
     EventQueueCUT queue;
     for (int topics = 0; topics < TOPIC_COUNT; topics ++)
     {
-        snprintf(buffer, sizeof(buffer), "topic_%03d\0", topics);
+        snprintf(buffer, sizeof(buffer), "topic_%03d", topics);
         std::string topic(buffer);
 
         for (int i = 0; i < OBSERVERS_COUNT; i++)
@@ -296,7 +296,7 @@ TEST_F(EventQueue_Test, TestObservers_Lambda)
     EventQueueCUT queue;
     for (int topics = 0; topics < TOPIC_COUNT; topics ++)
     {
-        snprintf(buffer, sizeof(buffer), "topic_%03d\0", topics);
+        snprintf(buffer, sizeof(buffer), "topic_%03d", topics);
         std::string topic(buffer);
 
         for (int i = 0; i < OBSERVERS_COUNT; i++)
