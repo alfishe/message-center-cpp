@@ -14,7 +14,7 @@ void MessageCenter_test::TearDown()
 
 TEST_F(MessageCenter_test, ThreadStartStop)
 {
-    MessageCenterCUT& center = MessageCenterCUT::DefaultMessageCenter();
+    MessageCenterCUT& center = MessageCenterCUT::DefaultMessageCenter(false);
     center.Start();
 
     sleep_ms(500);
@@ -22,4 +22,20 @@ TEST_F(MessageCenter_test, ThreadStartStop)
     center.Stop();
 
     center.dispose();
+
+    MessageCenterCUT::DisposeDefaultMessageCenter();
+}
+
+TEST_F(MessageCenter_test, ThreadStartStopAutostart)
+{
+    MessageCenterCUT& center = MessageCenterCUT::DefaultMessageCenter(true);
+    center.Start();
+
+    sleep_ms(500);
+
+    center.Stop();
+
+    center.dispose();
+
+    MessageCenterCUT::DisposeDefaultMessageCenter();
 }

@@ -17,7 +17,7 @@ protected:
 
 
 public:
-    static MessageCenter& DefaultMessageCenter();
+    static MessageCenter& DefaultMessageCenter(bool autostart = true);
     static void DisposeDefaultMessageCenter();
 
 protected:
@@ -41,12 +41,17 @@ class MessageCenterCUT : public MessageCenter
 public:
     static MessageCenterCUT* m_instanceCUT;
     MessageCenterCUT() : MessageCenter() {};
-    static MessageCenterCUT& DefaultMessageCenter()
+    static MessageCenterCUT& DefaultMessageCenter(bool autostart = true)
     {
         if (m_instanceCUT == nullptr)
         {
             m_instanceCUT = new MessageCenterCUT();
             m_instance = m_instanceCUT;
+
+            if (autostart)
+            {
+                m_instanceCUT->Start();
+            }
         }
 
         return *m_instanceCUT;

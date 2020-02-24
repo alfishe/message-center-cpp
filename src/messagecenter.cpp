@@ -24,11 +24,16 @@ MessageCenter::~MessageCenter()
     // No 'delete m_instance;' here! Singleton should be disposed from static method
 }
 
-MessageCenter& MessageCenter::DefaultMessageCenter()
+MessageCenter& MessageCenter::DefaultMessageCenter(bool autostart)
 {
     if (m_instance == nullptr)
     {
         m_instance = new MessageCenter();
+
+        if (autostart)
+        {
+            m_instance->Start();
+        }
     }
 
     return *m_instance;
@@ -39,6 +44,7 @@ void MessageCenter::DisposeDefaultMessageCenter()
     if (m_instance != nullptr)
     {
         m_instance->Stop();
+
         delete m_instance;
         m_instance = nullptr;
     }
@@ -57,6 +63,12 @@ void MessageCenter::Start()
 
 void MessageCenter::Stop()
 {
+    if (m_stopped.load())
+    {
+        // Thread already stopped
+        return;
+    }
+
     // Lock mutex until leaving the scope
     std::lock_guard<std::mutex> lock(m_mutexThreads);
 
@@ -92,6 +104,12 @@ void MessageCenter::ThreadWorker()
         {
             // Thread is requested to stop
             break;
+        }
+
+        Message* message= GetMessage();
+        if (message != nullptr)
+        {
+            Dispatch(message->tid, message);
         }
     }
 
