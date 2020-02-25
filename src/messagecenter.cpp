@@ -106,11 +106,16 @@ void MessageCenter::ThreadWorker()
             break;
         }
 
-        Message* message= GetMessage();
+        Message* message = GetMessage();
         if (message != nullptr)
         {
             Dispatch(message->tid, message);
         }
+
+        // Wait for new messages if queue is empty, but no more than 50ms
+        std::unique_lock<std::mutex> lock(m_mutexMessages);
+        m_cvEvents.wait_for(lock, std::chrono::milliseconds(50));
+        lock.unlock();
     }
 
 #ifdef _DEBUG
