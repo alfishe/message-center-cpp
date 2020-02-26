@@ -1,5 +1,7 @@
 #include <benchmark/benchmark.h>
+
 #include "eventqueue.h"
+#include "eventqueue_benchmark.h"
 #include <string>
 #include <sstream>
 
@@ -106,3 +108,50 @@ static void BM_ResolveNonExistingTopics(benchmark::State& state)
 }
 
 BENCHMARK(BM_ResolveNonExistingTopics)->RangeMultiplier(10)->Range(1, 10000)->Iterations(100)->Complexity(benchmark::oN);
+
+static void BM_PostSingleTopic(benchmark::State& state)
+{
+    EventQueueCUT queue;
+    FillQueue(queue);
+
+    for (auto _ : state)
+    {
+        for (int i = 0; i < state.range(0); i++)
+        {
+            queue.Post(1, nullptr);
+        }
+
+        state.SetComplexityN(state.range(0));
+    }
+}
+
+BENCHMARK(BM_PostSingleTopic)->RangeMultiplier(10)->Range(1, 10000)->Complexity(benchmark::oN);
+
+static void BM_GetMessageSingleTopic(benchmark::State& state)
+{
+    EventQueueCUT queue;
+    FillQueue(queue);
+
+    for (auto _ : state)
+    {
+        state.PauseTiming();
+        for (int i = 0; i < state.range(0); i++)
+        {
+            queue.Post(1, nullptr);
+        }
+        state.ResumeTiming();
+
+        for (int i = 0; i < state.range(0); i++)
+        {
+            Message* message = queue.GetMessage();
+            if (message->tid)
+            {
+                ;
+            }
+        }
+
+        state.SetComplexityN(state.range(0));
+    }
+}
+
+BENCHMARK(BM_GetMessageSingleTopic)->RangeMultiplier(10)->Range(1, 10000)->Complexity(benchmark::oN);
