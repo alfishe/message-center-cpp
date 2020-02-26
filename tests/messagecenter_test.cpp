@@ -49,7 +49,7 @@ TEST_F(MessageCenter_test, QueueOperations)
 
     center.Start();
 
-    sleep_ms(1500);
+    sleep_ms(100);
 
     center.Stop();
 

@@ -12,6 +12,8 @@ protected:
     static MessageCenter* m_instance;
     std::mutex m_mutexThreads;
     std::thread* m_thread;
+
+    std::atomic<bool> m_started;
     std::atomic<bool> m_requestStop;
     std::atomic<bool> m_stopped;
 
@@ -41,6 +43,7 @@ class MessageCenterCUT : public MessageCenter
 public:
     static MessageCenterCUT* m_instanceCUT;
     MessageCenterCUT() : MessageCenter() {};
+    virtual ~MessageCenterCUT() {};
     static MessageCenterCUT& DefaultMessageCenter(bool autostart = true)
     {
         if (m_instanceCUT == nullptr)
@@ -56,6 +59,13 @@ public:
 
         return *m_instanceCUT;
     };
+
+    static void DisposeDefaultMessageCenter()
+    {
+        MessageCenter::DisposeDefaultMessageCenter();
+
+        m_instanceCUT = nullptr;
+    }
 
 public:
     using EventQueue::m_topicsResolveMap;

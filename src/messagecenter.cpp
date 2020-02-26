@@ -9,6 +9,9 @@ MessageCenterCUT* MessageCenterCUT::m_instanceCUT = nullptr;
 
 MessageCenter::MessageCenter()
 {
+    m_started = false;
+    m_requestStop = false;
+    m_stopped = true;
 }
 
 MessageCenter::~MessageCenter()
@@ -52,6 +55,12 @@ void MessageCenter::DisposeDefaultMessageCenter()
 
 void MessageCenter::Start()
 {
+    if (m_started.load())
+    {
+        // Already started
+        return;
+    }
+
     // Lock mutex until leaving the scope
     std::lock_guard<std::mutex> lock(m_mutexThreads);
 
@@ -59,6 +68,8 @@ void MessageCenter::Start()
     m_stopped = false;
 
     m_thread = new std::thread(&MessageCenter::ThreadWorker, this);
+
+    m_started = true;
 }
 
 void MessageCenter::Stop()
@@ -85,10 +96,15 @@ void MessageCenter::Stop()
             m_thread->join();
         }
 
+        delete m_thread;
+        m_thread = nullptr;
+
 #ifdef _DEBUG
         std::cout << "MessageCenter thread stopped..." << std::endl;
 #endif // _DEBUG
     }
+
+    m_started = false;
 }
 
 // Thread worker method
@@ -111,11 +127,13 @@ void MessageCenter::ThreadWorker()
         {
             Dispatch(message->tid, message);
         }
-
-        // Wait for new messages if queue is empty, but no more than 50ms
-        std::unique_lock<std::mutex> lock(m_mutexMessages);
-        m_cvEvents.wait_for(lock, std::chrono::milliseconds(50));
-        lock.unlock();
+        else
+        {
+            // Wait for new messages if queue is empty, but no more than 50ms
+            std::unique_lock<std::mutex> lock(m_mutexMessages);
+            m_cvEvents.wait_for(lock, std::chrono::milliseconds(50));
+            lock.unlock();
+        }
     }
 
 #ifdef _DEBUG
