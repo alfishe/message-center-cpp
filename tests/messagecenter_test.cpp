@@ -46,11 +46,13 @@ TEST_F(MessageCenter_test, QueueOperations)
     // Create topics, register lambda observer, fill queue
     FillQueue(center);
 
-
+    // Start processing in separate thread
     center.Start();
 
+    // Give some time to process the whole queue
     sleep_ms(500);
 
+    // Stop processing thread
     center.Stop();
 
     center.dispose();
