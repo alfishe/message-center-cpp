@@ -137,7 +137,7 @@ int EventQueue::ResolveTopic(std::string& topic)
 
     if (topic.length() > 0)
     {
-        if (key_exists(m_topicsResolveMap, topic))
+        if (mc::key_exists(m_topicsResolveMap, topic))
         {
             result = m_topicsResolveMap[topic];
         }
@@ -152,7 +152,7 @@ int EventQueue::RegisterTopic(std::string& topic)
 
     if (topic.length() > 0)
     {
-        if (key_exists(m_topicsResolveMap, topic))
+        if (mc::key_exists(m_topicsResolveMap, topic))
         {
             // Already registered. Returning it's ID
             result = m_topicsResolveMap[topic];
@@ -225,7 +225,7 @@ ObserverVectorPtr EventQueue::GetObservers(int id)
 {
     ObserverVectorPtr result = nullptr;
 
-    if (key_exists(m_topicObservers, id))
+    if (mc::key_exists(m_topicObservers, id))
     {
         result = m_topicObservers[id];
     }
@@ -325,17 +325,17 @@ std::string EventQueue::DumpObservers()
 
                 if (observer->callback != nullptr)
                 {
-                    using namespace function_display;
+                    using namespace mc_function_display;
                     ss << "callback: " <<  observer->callback << std::endl;
                 }
                 else if (observer->callbackFunc != nullptr)
                 {
-                    using namespace lambda_display;
+                    using namespace mc_lambda_display;
                     ss << "callbackFunc: " << observer->callbackFunc << std::endl;
                 }
                 else if (observer->callbackMethod != nullptr)
                 {
-                    using namespace class_method_display;
+                    using namespace mc_class_method_display;
                     ss << "callbackMethod: " << observer->callbackMethod << std::endl;
                 }
                 else

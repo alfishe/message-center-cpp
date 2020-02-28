@@ -4,7 +4,7 @@
 #include <iostream>
 #include <iomanip>
 
-namespace function_display
+namespace mc_function_display
 {
     // Templated helper to print function pointers
     // See: https://stackoverflow.com/questions/2064692/how-to-print-function-pointers-with-cout
@@ -28,7 +28,7 @@ namespace function_display
 }
 
 #include <functional>
-namespace lambda_display
+namespace mc_lambda_display
 {
     template <typename Function>
     struct function_traits : public function_traits<decltype(&Function::operator())>
@@ -70,7 +70,7 @@ namespace lambda_display
     }
 }
 
-namespace class_method_display
+namespace mc_class_method_display
 {
     // Templated helper to print class method pointers
     // See: https://stackoverflow.com/questions/11111969/how-to-print-member-function-address-in-c

@@ -34,7 +34,7 @@ struct ObserverDescriptor
 };
 
 // Base class for all observer listeners. Derived class can implement method with any name
-// But signatures should be exactly void _custom_method_(int id, Message* message)
+// But signature should be exactly void _custom_method_(int id, Message* message)
 struct Observer
 {
 public:
