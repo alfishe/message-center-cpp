@@ -60,7 +60,7 @@ if (MSVC)
 
 	#add_subdirectory(${GOOGLEBENCHMARK_DIR} ${CMAKE_CURRENT_BINARY_DIR}/googlebenchmark)
 
-endif (WIN32)
+endif (MSVC)
 set(BENCHMARK_ENABLE_TESTING OFF)   # Disable Google Benchmark self-testing
 
 
