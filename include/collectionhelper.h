@@ -3,6 +3,8 @@
 
 #include <map>
 
+namespace mc
+{
 // Helps with freeing up memory from objects pointers to those stored in STL collections like list, vector
 // Advice: better to create shared_ptr version of collection list<shared_ptr<Obj>> instead
 // Example:
@@ -88,5 +90,6 @@ inline void for_each(C& container, Function function)
         func();
     });
 }
+} // End of namespace mc
 
 #endif //MESSAGE_CENTER_COLLECTIONHELPER_H

@@ -32,4 +32,12 @@ if (CMAKE_BUILD_TYPE MATCHES DEBUG)
 endif (CMAKE_BUILD_TYPE MATCHES DEBUG)
 
 # Link with following libraries
-target_link_libraries(${PROJECT_NAME} pthread)
+if (UNIX)
+    target_link_libraries(${PROJECT_NAME} pthread)
+endif (UNIX)
+
+if (MSVC)
+    # Match runtime library with default gtest settings. See: https://stackoverflow.com/questions/14172856/compile-with-mt-instead-of-md-using-cmake
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MT")
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd")
+endif (MSVC)
