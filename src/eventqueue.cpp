@@ -202,7 +202,7 @@ void EventQueue::Post(int id, void* obj)
 {
     if (id >= 0)
     {
-        // Lock parallel threads to access (active till return from method and lock destruction)
+        // Lock parallel threads to access (unique_lock can be unlocked arbitrarily)
         std::unique_lock<std::mutex> lock(m_mutexMessages);
 
         Message* message = new Message(id, obj);

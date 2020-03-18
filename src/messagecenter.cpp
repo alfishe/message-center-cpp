@@ -118,7 +118,7 @@ void MessageCenter::ThreadWorker()
     {
         if (m_requestStop.load())
         {
-            // Thread is requested to stop
+            // Thread is being requested to stop
             break;
         }
 
