@@ -110,6 +110,22 @@ void MessageCenter::Stop()
 // Thread worker method
 void MessageCenter::ThreadWorker()
 {
+    const char* threadName = "message_center_worker";
+
+#ifdef __APPLE__
+#include <pthread.h>
+    pthread_setname_np(threadName);
+#endif
+#ifdef __linux__
+    #include <pthread.h>
+	pthread_setname_np(threadName);
+#endif
+#ifdef _WIN32
+    #include <windows.h>
+	#include <processthreadsapi.h>
+	SetThreadDescription(GetCurrentThread(), threadName);
+#endif
+
 #ifdef _DEBUG
     std::cout << "MessageCenter thread started" << std::endl;
 #endif // _DEBUG
