@@ -1,5 +1,13 @@
 #include "messagecenter.h"
 
+#ifdef _WIN32
+    // windows.h cannot be included from function => C2958 linking and many other errors
+    #define WIN32_LEAN_AND_MEAN 1
+    #define _CRT_SECURE_NO_WARNINGS 1
+    #include <windows.h>
+    #include <stdlib.h>
+#endif
+
 // Definition for static field(s)
 MessageCenter* MessageCenter::m_instance = nullptr;
 
@@ -121,9 +129,15 @@ void MessageCenter::ThreadWorker()
 	pthread_setname_np(threadName);
 #endif
 #ifdef _WIN32
-    #include <windows.h>
-	#include <processthreadsapi.h>
-	SetThreadDescription(GetCurrentThread(), threadName);
+    static auto setThreadDescription = reinterpret_cast<HRESULT(WINAPI*)(HANDLE, PCWSTR)>(
+        GetProcAddress(GetModuleHandle("kernelbase.dll"), "SetThreadDescription"));
+    if (setThreadDescription == nullptr)
+    {
+	    wchar_t wname[24];
+	    size_t retval;
+        mbstowcs_s(&retval, wname, threadName, sizeof (threadName) / sizeof (threadName[0]));
+        setThreadDescription(GetCurrentThread(), wname);
+    }
 #endif
 
 #ifdef _DEBUG
@@ -138,7 +152,7 @@ void MessageCenter::ThreadWorker()
             break;
         }
 
-        Message* message = GetMessage();
+        Message* message = GetQueueMessage();
         if (message != nullptr)
         {
             Dispatch(message->tid, message);

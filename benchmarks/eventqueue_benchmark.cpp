@@ -43,7 +43,7 @@ BENCHMARK(BM_RegisterTopics)->RangeMultiplier(10)->Range(1, 1000)->Complexity(be
 
 static void BM_ResolveExistingTopics(benchmark::State& state)
 {
-    srand(time(NULL));
+    srand((unsigned)time(NULL));
     string topics[MAX_TOPICS];
     generateTopics(topics);
 
@@ -143,7 +143,7 @@ static void BM_GetMessageSingleTopic(benchmark::State& state)
 
         for (int i = 0; i < state.range(0); i++)
         {
-            Message* message = queue.GetMessage();
+            Message* message = queue.GetQueueMessage();
             if (message->tid)
             {
                 ;

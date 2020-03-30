@@ -76,7 +76,7 @@ public:
     using EventQueue::m_messageQueue;
 
     using EventQueue::GetObservers;
-    using EventQueue::GetMessage;
+    using EventQueue::GetQueueMessage;
     using EventQueue::Dispatch;
 
     using MessageCenter::m_instance;

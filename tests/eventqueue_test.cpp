@@ -198,7 +198,7 @@ TEST_F(EventQueue_Test, TestObservers_Callback)
     for (int i = 0; i < queue.m_messageQueue.size(); i++)
     {
         int messagesBeforeGet = queue.m_messageQueue.size();
-        Message* message = queue.GetMessage();
+        Message* message = queue.GetQueueMessage();
         int messagesAfterGet = queue.m_messageQueue.size();
 
         EXPECT_NE(message, nullptr);
@@ -272,7 +272,7 @@ TEST_F(EventQueue_Test, TestObservers_ClassMethod)
 
     for (int i = 0; i < queue.m_messageQueue.size(); i++)
     {
-        Message* message = queue.GetMessage();
+        Message* message = queue.GetQueueMessage();
         EXPECT_NE(message, nullptr);
 
 #ifdef _DEBUG
@@ -336,7 +336,7 @@ TEST_F(EventQueue_Test, TestObservers_Lambda)
 
     for (int i = 0; i < queue.m_messageQueue.size(); i++)
     {
-        Message* message = queue.GetMessage();
+        Message* message = queue.GetQueueMessage();
         EXPECT_NE(message, nullptr);
 
 #ifdef _DEBUG

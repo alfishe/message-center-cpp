@@ -234,7 +234,7 @@ ObserverVectorPtr EventQueue::GetObservers(int id)
 }
 
 // Retrieve topmost message in Message Queue
-Message* EventQueue::GetMessage()
+Message* EventQueue::GetQueueMessage()
 {
     Message* result = nullptr;
 
