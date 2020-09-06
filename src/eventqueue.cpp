@@ -131,6 +131,102 @@ int EventQueue::AddObserver(std::string& topic, ObserverDescriptor* observer)
     return result;
 }
 
+void EventQueue::RemoveObserver(std::string& topic, ObserverCallback callback)
+{
+    int result = ResolveTopic(topic);
+
+    // Lock parallel threads to access (active till return from method and lock destruction)
+    std::lock_guard<std::mutex> lock(m_mutexObservers);
+
+    ObserverVectorPtr observers = GetObservers(result);
+    if (observers != nullptr)
+    {
+        ObserversVector::const_iterator it;
+        for (it = observers->begin(); it != observers->end(); )
+        {
+            ObserverDescriptor* observer = *it;
+
+            if (observer->callback == callback)
+            {
+                // Erase current element and get next iterator value
+                it = observers->erase(it);
+            }
+            else
+            {
+                it++;
+            }
+        }
+    }
+}
+
+void EventQueue::RemoveObserver(std::string& topic, Observer* instance, ObserverCallbackMethod callback)
+{
+    int result = ResolveTopic(topic);
+
+    // Lock parallel threads to access (active till return from method and lock destruction)
+    std::lock_guard<std::mutex> lock(m_mutexObservers);
+
+    ObserverVectorPtr observers = GetObservers(result);
+    if (observers != nullptr)
+    {
+        ObserversVector::const_iterator it;
+        for (it = observers->begin(); it != observers->end(); )
+        {
+            ObserverDescriptor* observer = *it;
+
+            if (observer->observerInstance == instance && observer->callbackMethod == callback)
+            {
+                // Erase current element and get next iterator value
+                it = observers->erase(it);
+            }
+            else
+            {
+                it++;
+            }
+        }
+    }
+}
+
+void EventQueue::RemoveObserver(std::string& topic, ObserverCallbackFunc callback)
+{
+    int result = ResolveTopic(topic);
+
+    // Lock parallel threads to access (active till return from method and lock destruction)
+    std::lock_guard<std::mutex> lock(m_mutexObservers);
+
+    ObserverVectorPtr observers = GetObservers(result);
+    if (observers != nullptr)
+    {
+        auto callbackTargetAddr = mc_lambda_display::getTargetAddress(callback);
+
+        ObserversVector::const_iterator it;
+        for (it = observers->begin(); it != observers->end(); )
+        {
+            ObserverDescriptor* observer = *it;
+            auto curTargetAddr = mc_lambda_display::getTargetAddress(observer->callbackFunc);
+
+            if (curTargetAddr == callbackTargetAddr)
+            {
+                // Erase current element and get next iterator value
+                it = observers->erase(it);
+            }
+            else
+            {
+                it++;
+            }
+        }
+    }
+}
+
+int EventQueue::ResolveTopic(const char* topic)
+{
+    std::string strTopic(topic);
+    int result = ResolveTopic(strTopic);
+
+    return result;
+}
+
+
 int EventQueue::ResolveTopic(std::string& topic)
 {
     int result = -1;
@@ -142,6 +238,14 @@ int EventQueue::ResolveTopic(std::string& topic)
             result = m_topicsResolveMap[topic];
         }
     }
+
+    return result;
+}
+
+int EventQueue::RegisterTopic(const char* topic)
+{
+    std::string strTopic(topic);
+    int result = RegisterTopic(strTopic);
 
     return result;
 }

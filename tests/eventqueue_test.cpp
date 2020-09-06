@@ -214,6 +214,23 @@ TEST_F(EventQueue_Test, TestObservers_Callback)
         std::cout << "End of dispatch message for tid:" << message->tid << std::endl;
 #endif // _DEBUG
     }
+
+    // Test observers removal
+    for (int topics = 0; topics < TOPIC_COUNT; topics ++)
+    {
+        snprintf(buffer, sizeof(buffer), "topic_%03d", topics);
+        std::string topic(buffer);
+        int topicID = queue.ResolveTopic(topic);
+
+        size_t observersBeforeDeletion = queue.GetObservers(topicID)->size();
+        EXPECT_GE(observersBeforeDeletion, 0);
+
+        queue.RemoveObserver(topic, TestObservers_Callback_callback);
+
+        EXPECT_GE(topicID, 0);
+        size_t uniqueObservers = queue.GetObservers(topicID)->size();
+        EXPECT_EQ(uniqueObservers, 0);
+    }
 }
 
 
@@ -285,6 +302,26 @@ TEST_F(EventQueue_Test, TestObservers_ClassMethod)
         std::cout << "End of dispatch message for tid:" << message->tid << std::endl;
 #endif // _DEBUG
     }
+
+    // Test observers removal
+    for (int topics = 0; topics < TOPIC_COUNT; topics ++)
+    {
+        snprintf(buffer, sizeof(buffer), "topic_%03d", topics);
+        std::string topic(buffer);
+        int topicID = queue.ResolveTopic(topic);
+
+        size_t observersBeforeDeletion = queue.GetObservers(topicID)->size();
+        EXPECT_GE(observersBeforeDeletion, 0);
+
+
+        Observer* observerInstance = static_cast<Observer*>(&observerDerivedInstance);
+        ObserverCallbackMethod callback = static_cast<ObserverCallbackMethod>(&TestObservers_ClassMethod_class::ObserverTestMethod);
+        queue.RemoveObserver(topic, observerInstance, callback);
+
+        EXPECT_GE(topicID, 0);
+        size_t uniqueObservers = queue.GetObservers(topicID)->size();
+        EXPECT_EQ(uniqueObservers, 0);
+    }
 }
 
 TEST_F(EventQueue_Test, TestObservers_Lambda)
@@ -292,6 +329,7 @@ TEST_F(EventQueue_Test, TestObservers_Lambda)
     static char buffer[200];
     static const int TOPIC_COUNT = 10;
     static const int OBSERVERS_COUNT = 5;
+    ObserverCallbackFunc usedLambdas[TOPIC_COUNT][OBSERVERS_COUNT];
 
     EventQueueCUT queue;
     for (int topics = 0; topics < TOPIC_COUNT; topics ++)
@@ -308,6 +346,9 @@ TEST_F(EventQueue_Test, TestObservers_Lambda)
 #endif // _DEBUG
 
             };
+
+            // Register lambda so we can remove observer later
+            usedLambdas[topics][i] = callback;
 
             queue.AddObserver(topic, callback);
         }
@@ -348,6 +389,32 @@ TEST_F(EventQueue_Test, TestObservers_Lambda)
 #ifdef _DEBUG
         std::cout << "End of dispatch message for tid:" << message->tid << std::endl;
 #endif // _DEBUG
+    }
+
+    // Test observers removal
+    for (int topics = 0; topics < TOPIC_COUNT; topics ++)
+    {
+        snprintf(buffer, sizeof(buffer), "topic_%03d", topics);
+        std::string topic(buffer);
+        int topicID = queue.ResolveTopic(topic);
+
+        for (int i = 0; i < OBSERVERS_COUNT; i++)
+        {
+            size_t observersBeforeDeletion = queue.GetObservers(topicID)->size();
+            EXPECT_GE(observersBeforeDeletion, 0);
+
+            ObserverCallbackFunc callback = usedLambdas[topics][i];
+            EXPECT_NE(callback, nullptr);
+
+            queue.RemoveObserver(topic, callback);
+
+            size_t observersAfterDeletion = queue.GetObservers(topicID)->size();
+            EXPECT_EQ(observersAfterDeletion, 0);
+        }
+
+        // Everything was cleared
+        size_t uniqueObservers = queue.GetObservers(topicID)->size();
+        EXPECT_EQ(uniqueObservers, 0);
     }
 }
 
