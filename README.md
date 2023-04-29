@@ -18,11 +18,11 @@ Submodules:
 
 How to start:
 
-    git clone --recurse-submodules https://github/alfishe/message-center-cpp.git
+    git clone --recurse-submodules https://github.com/alfishe/message-center-cpp.git
 
 or
 
-    git clone https://github/alfishe/message-center-cpp.git
+    git clone https://github.com/alfishe/message-center-cpp.git
     git submodule init
     git submodule update
 
