@@ -155,3 +155,56 @@ static void BM_GetMessageSingleTopic(benchmark::State& state)
 }
 
 BENCHMARK(BM_GetMessageSingleTopic)->RangeMultiplier(10)->Range(1, 10000)->Complexity(benchmark::oN);
+
+/// region <TPS benchmarks>
+static void BM_PostSingleTopicTPS(benchmark::State& state)
+{
+    EventQueueCUT queue;
+    FillQueue(queue);
+
+    for (auto _ : state)
+    {
+        for (int i = 0; i < state.range(0); i++)
+        {
+            queue.Post(1, nullptr);
+        }
+    }
+
+    // Calculate transactions per period and report it to the benchmark framework
+    state.SetItemsProcessed(state.iterations());
+}
+
+BENCHMARK(BM_PostSingleTopicTPS)->Range(1, 1 << 18)->Unit(benchmark::kMillisecond);
+
+static void BM_GetMessageSingleTopicTPS(benchmark::State& state)
+{
+    EventQueueCUT queue;
+    FillQueue(queue);
+
+    for (auto _ : state)
+    {
+        state.PauseTiming();
+        for (int i = 0; i < state.range(0); i++)
+        {
+            queue.Post(1, nullptr);
+        }
+        state.ResumeTiming();
+
+        for (int i = 0; i < state.range(0); i++)
+        {
+            Message* message = queue.GetQueueMessage();
+            if (message->tid)
+            {
+                ;
+            }
+        }
+    }
+
+    // Calculate transactions per period and report it to the benchmark framework
+    state.SetItemsProcessed(state.iterations());
+}
+
+BENCHMARK(BM_GetMessageSingleTopicTPS)->Range(1, 1 << 18)->Unit(benchmark::kMillisecond);
+
+
+/// endregion </TPS benchmarks>
