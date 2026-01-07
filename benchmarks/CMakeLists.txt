@@ -52,6 +52,7 @@ set(BENCHMARK_ENABLE_TESTING OFF)   # Disable Google Benchmark self-testing
 include_directories(${ROOT_DIR}/include)
 include_directories(${ROOT_DIR}/src)
 include_directories(${GOOGLEBENCHMARK_DIR}/include)
+include_directories(${ROOT_DIR}/lib/concurrentqueue)
 
 # Store executable into /bin subfolder
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

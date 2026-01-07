@@ -14,6 +14,7 @@ include(${ROOT_DIR}/cmake/func.cmake)
 
 # Compiler include folders
 include_directories(${ROOT_DIR}/include)
+include_directories(${ROOT_DIR}/lib/concurrentqueue)
 
 # Store executable into /bin subfolder
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

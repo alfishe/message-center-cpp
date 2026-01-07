@@ -515,3 +515,27 @@ std::string EventQueue::DumpMessageQueueNoLock()
 }
 
 #endif // _DEBUG
+void EventQueue::RemoveObserver(const std::string &topic,
+                                ObserverDescriptor *observer) {
+  int result = ResolveTopic(topic);
+
+  // Lock parallel threads to access (active till return from method and lock
+  // destruction)
+  std::lock_guard<std::mutex> lock(m_mutexObservers);
+
+  ObserverVectorPtr observers = GetObservers(result);
+  if (observers != nullptr) {
+    ObserversVector::const_iterator it;
+    for (it = observers->begin(); it != observers->end();) {
+      if (*it == observer) {
+        // Erase current element and get next iterator value
+        it = observers->erase(it);
+
+        // Destroy descriptor object
+        delete observer;
+      } else {
+        it++;
+      }
+    }
+  }
+}
