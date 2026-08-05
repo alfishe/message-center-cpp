@@ -17,7 +17,9 @@
 class RefCountedPayload {
   std::atomic<int> m_refCount{1};
   size_t m_size;
-  alignas(8) char m_data[]; // Flexible array member (C99/C++11 extension)
+  // Use char[1] instead of flexible array member for MSVC compatibility
+  // Actual allocation includes extra space for user data
+  alignas(8) char m_data[1];
 
   RefCountedPayload(size_t size) : m_size(size) {}
 
