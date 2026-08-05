@@ -4,6 +4,7 @@
 #define MESSAGE_CENTER_EVENTQUEUE_H
 
 #include "collectionhelper.h"
+#include "objectpool.h"
 #include "streamhelper.h"
 
 #include <atomic>
@@ -12,7 +13,9 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -27,24 +30,28 @@ constexpr unsigned MAX_TOPICS = 1024;
 
 struct Observer;
 struct Message;
-typedef void (ObserverCallback)(int id, Message* message);                      // Classic callback
-typedef void (Observer::* ObserverCallbackMethod)(int id, Message* message);    // Class method callback
-typedef std::function<void(int id, Message* message)> ObserverCallbackFunc;     // For lambda usage
-struct ObserverDescriptor
-{
-    ObserverCallback* callback;
-    ObserverCallbackMethod callbackMethod;  // Uses Observer::_some_method(int id, Message* messsage) callback signature. Requires observerInstance to be defined.
-    ObserverCallbackFunc callbackFunc;
+typedef void(ObserverCallback)(int id, Message *message); // Classic callback
+typedef void (Observer::*ObserverCallbackMethod)(
+    int id, Message *message); // Class method callback
+typedef std::function<void(int id, Message *message)>
+    ObserverCallbackFunc; // For lambda usage
+struct ObserverDescriptor {
+  ObserverCallback *callback;
+  ObserverCallbackMethod
+      callbackMethod; // Uses Observer::_some_method(int id, Message* messsage)
+                      // callback signature. Requires observerInstance to be
+                      // defined.
+  ObserverCallbackFunc callbackFunc;
 
-    Observer* observerInstance;             // Used to hold class instance for callbackMethod
+  Observer *observerInstance; // Used to hold class instance for callbackMethod
 };
 
-// Base class for all observer listeners. Derived class can implement method with any name
-// But signature should be exactly void _custom_method_(int id, Message* message)
-struct Observer
-{
+// Base class for all observer listeners. Derived class can implement method
+// with any name But signature should be exactly void _custom_method_(int id,
+// Message* message)
+struct Observer {
 public:
-    //virtual void ObserverCallbackMethod(int id, Message* message) = 0;
+  // virtual void ObserverCallbackMethod(int id, Message* message) = 0;
 };
 
 // Topic types
@@ -52,35 +59,35 @@ typedef std::map<std::string, int> TopicResolveMap;
 typedef std::pair<std::string, int> TopicResolveRecord;
 
 // Observer types
-typedef std::vector<ObserverDescriptor*> ObserversVector;
-typedef ObserversVector* ObserverVectorPtr;
+typedef std::vector<ObserverDescriptor *> ObserversVector;
+typedef ObserversVector *ObserverVectorPtr;
 typedef std::map<int, ObserverVectorPtr> TopicObserversMap;
 
 // Base class for payload objects
-class MessagePayload
-{
+class MessagePayload {
 public:
-    MessagePayload() {};
-    virtual ~MessagePayload() {};
+  MessagePayload(){};
+  virtual ~MessagePayload(){};
 };
-
 
 // Message types
-struct Message
-{
+struct Message {
 public:
-    unsigned tid;
-    MessagePayload* obj;
-    bool cleanupPayload;
+  unsigned tid;
+  MessagePayload *obj;
+  bool cleanupPayload;
 
-    Message(unsigned tid, MessagePayload* obj = nullptr, bool cleanupPayload = true)
-    {
-        this->tid = tid;
-        this->obj = obj;
-        this->cleanupPayload = cleanupPayload;
-    }
+  // Default constructor for object pooling
+  Message() : tid(0), obj(nullptr), cleanupPayload(false) {}
+
+  Message(unsigned tid, MessagePayload *obj = nullptr,
+          bool cleanupPayload = true) {
+    this->tid = tid;
+    this->obj = obj;
+    this->cleanupPayload = cleanupPayload;
+  }
 };
-typedef std::deque<Message*> MessageQueue;
+typedef std::deque<Message *> MessageQueue;
 
 /// endregion </Types>
 
@@ -88,110 +95,139 @@ typedef std::deque<Message*> MessageQueue;
 
 /// Allows to pass text string in MessageCenter message
 /// Example: messageCenter.Post(topic, new SimpleTextPayload("my text message");
-class SimpleTextPayload : public MessagePayload
-{
+class SimpleTextPayload : public MessagePayload {
 public:
-    std::string _payloadText;
+  std::string _payloadText;
 
 public:
-    SimpleTextPayload(std::string& text) : MessagePayload() { _payloadText = std::string(text); };
-    SimpleTextPayload(const char* text) : MessagePayload() { _payloadText = std::string(text); };
-    ~SimpleTextPayload() {};
+  SimpleTextPayload(std::string &text) : MessagePayload() {
+    _payloadText = std::string(text);
+  };
+  SimpleTextPayload(const char *text) : MessagePayload() {
+    _payloadText = std::string(text);
+  };
+  ~SimpleTextPayload(){};
 };
 
-
 /// endregion </Predefined payload types>
-class EventQueue
-{
-// Synchronization primitives
+class EventQueue {
+  // Synchronization primitives
 protected:
-    std::atomic<bool> m_initialized;
-    std::mutex m_mutexObservers;
+  std::atomic<bool> m_initialized;
+  std::mutex m_mutexObservers;
 
-    std::mutex m_mutexMessages;
-    std::condition_variable m_cvEvents;
+  std::mutex m_mutexMessages;
+  std::condition_variable m_cvEvents;
 
-// Fields
+  // Fields
 protected:
-    std::string m_topics[MAX_TOPICS];
-    TopicResolveMap m_topicsResolveMap;
-    int m_topicMax = 0;
+  std::string m_topics[MAX_TOPICS];
+  TopicResolveMap m_topicsResolveMap;
+  int m_topicMax = 0;
 
-    TopicObserversMap m_topicObservers;
+  TopicObserversMap m_topicObservers;
 
-    MessageQueue m_messageQueue;
+  MessageQueue m_messageQueue;
 
-// Class methods
+  // Object pool for messages
+  static ObjectPool<Message> MessagePool;
+
+  // COW storage for observers
+  using ObserversList = std::vector<ObserverDescriptor *>;
+  using ObserversListPtr = std::shared_ptr<ObserversList>;
+
+  std::vector<ObserversListPtr> m_cowObservers;
+  mutable std::shared_mutex m_mutexCOW;
+  std::mutex m_mutexUpdates;
+
+  // Dispatch tracking for safe unregister
+  std::atomic<int> m_activeDispatches{0};
+  std::condition_variable m_cvNoneActive;
+  mutable std::mutex m_mutexWait;
+
+  // Class methods
 public:
-    EventQueue();
-    virtual ~EventQueue();
-    EventQueue(const EventQueue& that) = delete; 			// Disable copy constructor. C++11 feature
-    EventQueue& operator =(EventQueue const&) = delete;		// Disable assignment operator. C++11 feature
+  EventQueue();
+  virtual ~EventQueue();
+  EventQueue(const EventQueue &that) =
+      delete; // Disable copy constructor. C++11 feature
+  EventQueue &operator=(EventQueue const &) =
+      delete; // Disable assignment operator. C++11 feature
 
-// Initialization
+  // Initialization
 public:
-    bool init();
-    void dispose();
+  bool init();
+  void dispose();
 
-// Public methods
+  // Public methods
 public:
-    int AddObserver(const std::string& topic, ObserverCallback callback);
-    int AddObserver(const std::string& topic, Observer* instance, ObserverCallbackMethod callback);
-    int AddObserver(const std::string& topic, ObserverCallbackFunc callback);
-    int AddObserver(const std::string& topic, ObserverDescriptor* observer);
+  int AddObserver(const std::string &topic, ObserverCallback callback);
+  int AddObserver(const std::string &topic, Observer *instance,
+                  ObserverCallbackMethod callback);
+  int AddObserver(const std::string &topic, ObserverCallbackFunc callback);
+  int AddObserver(const std::string &topic, ObserverDescriptor *observer);
 
-    void RemoveObserver(const std::string& topic, ObserverCallback callback);
-    void RemoveObserver(const std::string& topic, Observer* instance, ObserverCallbackMethod callback);
-    void RemoveObserver(const std::string& topic, ObserverCallbackFunc callback);
-    void RemoveObserver(const std::string& topic, ObserverDescriptor* observer);
+  void RemoveObserver(const std::string &topic, ObserverCallback callback);
+  void RemoveObserver(const std::string &topic, Observer *instance,
+                      ObserverCallbackMethod callback);
+  void RemoveObserver(const std::string &topic, ObserverCallbackFunc callback);
+  void RemoveObserver(const std::string &topic, ObserverDescriptor *observer);
 
-    int ResolveTopic(const char* topic);
-    int ResolveTopic(const std::string& topic);
-    int RegisterTopic(const char* topic);
-    int RegisterTopic(const std::string& topic);
-    std::string GetTopicByID(int id);
-    void ClearTopics();
+  int ResolveTopic(const char *topic);
+  int ResolveTopic(const std::string &topic);
+  int RegisterTopic(const char *topic);
+  int RegisterTopic(const std::string &topic);
+  std::string GetTopicByID(int id);
+  void ClearTopics();
 
-    void Post(int id, MessagePayload* obj = nullptr, bool autoCleanupPayload = false);
-    void Post(std::string topic, MessagePayload* obj = nullptr, bool autoCleanupPayload = false);
+  void Post(int id, MessagePayload *obj = nullptr,
+            bool autoCleanupPayload = false);
+  void Post(std::string topic, MessagePayload *obj = nullptr,
+            bool autoCleanupPayload = false);
 
 protected:
-    Message* GetQueueMessage();
-    void Dispatch(int id, Message* message);
+  Message *GetQueueMessage();
+  void Dispatch(int id, Message *message);
 
-    ObserverVectorPtr GetObservers(int id);
+  ObserverVectorPtr GetObservers(int id);
+
+  // COW helpers
+  void ResizeCOW(size_t size);
+  void WaitForDispatchesComplete();
+  void RemoveObserverGeneric(const std::string &topic,
+                             std::function<bool(ObserverDescriptor *)> match);
 
 #ifdef _DEBUG
-    // Debug helpers
+  // Debug helpers
 public:
-    std::string DumpTopics();
-    std::string DumpObservers();
-    std::string DumpMessageQueue();
-    std::string DumpMessageQueueNoLock();
+  std::string DumpTopics();
+  std::string DumpObservers();
+  std::string DumpMessageQueue();
+  std::string DumpMessageQueueNoLock();
 #endif // _DEBUG
 };
 
 //
-// Code Under Test (CUT) wrapper to allow access to protected and private properties and methods for unit testing / benchmark purposes
+// Code Under Test (CUT) wrapper to allow access to protected and private
+// properties and methods for unit testing / benchmark purposes
 //
 #ifdef _CODE_UNDER_TEST
 
-class EventQueueCUT : public EventQueue
-{
+class EventQueueCUT : public EventQueue {
 public:
-    EventQueueCUT() : EventQueue() {};
+  EventQueueCUT() : EventQueue(){};
 
 public:
-    using EventQueue::m_topicsResolveMap;
-    using EventQueue::m_topicMax;
+  using EventQueue::m_topicMax;
+  using EventQueue::m_topicsResolveMap;
 
-    using EventQueue::m_topicObservers;
+  using EventQueue::m_topicObservers;
 
-    using EventQueue::m_messageQueue;
+  using EventQueue::m_messageQueue;
 
-    using EventQueue::GetObservers;
-    using EventQueue::GetQueueMessage;
-    using EventQueue::Dispatch;
+  using EventQueue::Dispatch;
+  using EventQueue::GetObservers;
+  using EventQueue::GetQueueMessage;
 };
 #endif // _CODE_UNDER_TEST
 
