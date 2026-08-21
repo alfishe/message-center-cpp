@@ -131,13 +131,14 @@ void MessageCenter::ThreadWorker()
 	pthread_setname_np(threadName);
 #endif
 #ifdef _WIN32
-    static auto setThreadDescription = reinterpret_cast<HRESULT(WINAPI*)(HANDLE, PCWSTR)>(
-        GetProcAddress(GetModuleHandle("kernelbase.dll"), "SetThreadDescription"));
-    if (setThreadDescription == nullptr)
+    using SetThreadDescriptionFunc = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+    static auto setThreadDescription = reinterpret_cast<SetThreadDescriptionFunc>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandle("kernelbase.dll"), "SetThreadDescription")));
+    if (setThreadDescription != nullptr)
     {
-	    wchar_t wname[24];
-	    size_t retval;
-        mbstowcs_s(&retval, wname, threadName, sizeof (threadName) / sizeof (threadName[0]));
+        wchar_t wname[32];
+        size_t retval;
+        mbstowcs_s(&retval, wname, 32, threadName, 31);
         setThreadDescription(GetCurrentThread(), wname);
     }
 #endif
