@@ -233,6 +233,113 @@ TEST_F(EventQueue_Test, TestObservers_Callback)
     }
 }
 
+// Test that capturing lambdas (which exceed libc++'s small buffer optimization)
+// can be reliably removed using observer IDs. This was broken before the fix
+// because the getTargetAddress trick reads the first word of std::function,
+// which points to different heap addresses for each lambda copy.
+TEST_F(EventQueue_Test, TestObservers_CapturingLambda_IdBasedRemoval)
+{
+    EventQueueCUT queue;
+    std::string topic = "test_capturing_lambda";
+
+    // Create a capturing lambda that exceeds the small buffer optimization
+    // (libc++ inline buffer is ~24 bytes, this capture is larger)
+    std::array<uint64_t, 8> largeCapture = {1, 2, 3, 4, 5, 6, 7, 8};
+    int callCount = 0;
+
+    auto capturingLambda = [largeCapture, &callCount](int id, Message* message) {
+        callCount++;
+        // Use the capture to prevent optimization
+        (void)largeCapture[0];
+    };
+
+    // Add the observer and save its ID
+    uint64_t observerId = queue.AddObserver(topic, capturingLambda);
+    EXPECT_NE(observerId, 0u);
+
+    int topicID = queue.ResolveTopic(topic);
+    EXPECT_GE(topicID, 0);
+    EXPECT_EQ(queue.GetObservers(topicID)->size(), 1u);
+
+    // Post a message and verify the observer was called
+    queue.Post(topic);
+    Message* message = queue.GetQueueMessage();
+    ASSERT_NE(message, nullptr);
+    queue.Dispatch(message->tid, message);
+    EXPECT_EQ(callCount, 1);
+
+    // Remove by ID (the only reliable way for capturing lambdas)
+    queue.RemoveObserverById(topic, observerId);
+    EXPECT_EQ(queue.GetObservers(topicID)->size(), 0u);
+
+    // Verify removal worked - posting should not call the lambda
+    queue.Post(topic);
+    message = queue.GetQueueMessage();
+    ASSERT_NE(message, nullptr);
+    queue.Dispatch(message->tid, message);
+    EXPECT_EQ(callCount, 1);  // Still 1, not incremented
+}
+
+// Test that multiple capturing lambdas can be added and removed independently
+TEST_F(EventQueue_Test, TestObservers_MultipleCapturingLambdas)
+{
+    EventQueueCUT queue;
+    std::string topic = "test_multiple_capturing";
+
+    std::array<uint64_t, 8> capture1 = {1, 1, 1, 1, 1, 1, 1, 1};
+    std::array<uint64_t, 8> capture2 = {2, 2, 2, 2, 2, 2, 2, 2};
+    std::array<uint64_t, 8> capture3 = {3, 3, 3, 3, 3, 3, 3, 3};
+
+    int count1 = 0, count2 = 0, count3 = 0;
+
+    uint64_t id1 = queue.AddObserver(topic, [capture1, &count1](int, Message*) {
+        count1++;
+        (void)capture1[0];
+    });
+
+    uint64_t id2 = queue.AddObserver(topic, [capture2, &count2](int, Message*) {
+        count2++;
+        (void)capture2[0];
+    });
+
+    uint64_t id3 = queue.AddObserver(topic, [capture3, &count3](int, Message*) {
+        count3++;
+        (void)capture3[0];
+    });
+
+    EXPECT_NE(id1, id2);
+    EXPECT_NE(id2, id3);
+    EXPECT_NE(id1, id3);
+
+    int topicID = queue.ResolveTopic(topic);
+    EXPECT_EQ(queue.GetObservers(topicID)->size(), 3u);
+
+    // Dispatch and verify all three called
+    queue.Post(topic);
+    Message* message = queue.GetQueueMessage();
+    queue.Dispatch(message->tid, message);
+    EXPECT_EQ(count1, 1);
+    EXPECT_EQ(count2, 1);
+    EXPECT_EQ(count3, 1);
+
+    // Remove the middle one
+    queue.RemoveObserverById(topic, id2);
+    EXPECT_EQ(queue.GetObservers(topicID)->size(), 2u);
+
+    // Dispatch again - only 1 and 3 should be called
+    queue.Post(topic);
+    message = queue.GetQueueMessage();
+    queue.Dispatch(message->tid, message);
+    EXPECT_EQ(count1, 2);
+    EXPECT_EQ(count2, 1);  // Not called
+    EXPECT_EQ(count3, 2);
+
+    // Remove remaining observers
+    queue.RemoveObserverById(topic, id1);
+    queue.RemoveObserverById(topic, id3);
+    EXPECT_EQ(queue.GetObservers(topicID)->size(), 0u);
+}
+
 
 class TestObservers_ClassMethod_class : public Observer
 {
@@ -329,7 +436,7 @@ TEST_F(EventQueue_Test, TestObservers_Lambda)
     static char buffer[200];
     static const int TOPIC_COUNT = 10;
     static const int OBSERVERS_COUNT = 5;
-    ObserverCallbackFunc usedLambdas[TOPIC_COUNT][OBSERVERS_COUNT];
+    uint64_t observerIds[TOPIC_COUNT][OBSERVERS_COUNT];
 
     EventQueueCUT queue;
     for (int topics = 0; topics < TOPIC_COUNT; topics ++)
@@ -347,10 +454,9 @@ TEST_F(EventQueue_Test, TestObservers_Lambda)
 
             };
 
-            // Register lambda so we can remove observer later
-            usedLambdas[topics][i] = callback;
-
-            queue.AddObserver(topic, callback);
+            // Store observer ID for removal (lambdas can't be matched by address)
+            observerIds[topics][i] = queue.AddObserver(topic, callback);
+            EXPECT_NE(observerIds[topics][i], 0u);
         }
 
         int topicID = queue.ResolveTopic(topic);
@@ -391,7 +497,7 @@ TEST_F(EventQueue_Test, TestObservers_Lambda)
 #endif // _DEBUG
     }
 
-    // Test observers removal
+    // Test observers removal using IDs
     for (int topics = 0; topics < TOPIC_COUNT; topics ++)
     {
         snprintf(buffer, sizeof(buffer), "topic_%03d", topics);
@@ -401,15 +507,12 @@ TEST_F(EventQueue_Test, TestObservers_Lambda)
         for (int i = 0; i < OBSERVERS_COUNT; i++)
         {
             size_t observersBeforeDeletion = queue.GetObservers(topicID)->size();
-            EXPECT_GE(observersBeforeDeletion, 0);
+            EXPECT_EQ(observersBeforeDeletion, static_cast<size_t>(OBSERVERS_COUNT - i));
 
-            ObserverCallbackFunc callback = usedLambdas[topics][i];
-            EXPECT_NE(callback, nullptr);
-
-            queue.RemoveObserver(topic, callback);
+            queue.RemoveObserverById(topic, observerIds[topics][i]);
 
             size_t observersAfterDeletion = queue.GetObservers(topicID)->size();
-            EXPECT_EQ(observersAfterDeletion, 0);
+            EXPECT_EQ(observersAfterDeletion, static_cast<size_t>(OBSERVERS_COUNT - i - 1));
         }
 
         // Everything was cleared

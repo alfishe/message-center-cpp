@@ -60,20 +60,24 @@ int main() {
     auto& mc = MessageCenter::DefaultMessageCenter();
     
     // Subscribe: logging observer (lambda wrapped in ObserverCallbackFunc)
-    mc.AddObserver("player.moved", ObserverCallbackFunc([](int id, Message* msg) {
+    // AddObserver returns a unique ID for reliable removal
+    uint64_t loggerId = mc.AddObserver("player.moved", ObserverCallbackFunc([](int id, Message* msg) {
         auto* e = static_cast<PlayerMoved*>(msg->obj);
         printf("Player %u moved to (%.1f, %.1f)\n", e->playerId, e->x, e->y);
     }));
     
     // Subscribe: boundary checker (lambda capturing state)
     float maxX = 100.0f;
-    mc.AddObserver("player.moved", ObserverCallbackFunc([maxX](int id, Message* msg) {
+    uint64_t boundaryId = mc.AddObserver("player.moved", ObserverCallbackFunc([maxX](int id, Message* msg) {
         auto* e = static_cast<PlayerMoved*>(msg->obj);
         if (e->x > maxX) printf("Player %u out of bounds!\n", e->playerId);
     }));
     
     // Publish: fire-and-forget, payload auto-cleaned after dispatch
     mc.Post("player.moved", new PlayerMoved(1, 10.5f, 20.0f));
+    
+    // Unsubscribe: use returned ID (lambdas can't be matched by address)
+    mc.RemoveObserverById("player.moved", boundaryId);
     
     return 0;
 }
