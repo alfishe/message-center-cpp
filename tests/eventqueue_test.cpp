@@ -1,6 +1,7 @@
 #include "eventqueue_test.h"
 
 #include <cstdio>
+#include <array>
 
 void EventQueue_Test::SetUp()
 {

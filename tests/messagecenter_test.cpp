@@ -59,3 +59,11 @@ TEST_F(MessageCenter_test, QueueOperations)
 
     MessageCenterCUT::DisposeDefaultMessageCenter();
 }
+TEST_F(MessageCenter_test, DisposeWithoutStart)
+{
+    MessageCenterCUT& center = MessageCenterCUT::DefaultMessageCenter(false);
+    (void)center;
+
+    // Disposing without ever calling Start() must safely clean up without segfaulting
+    MessageCenterCUT::DisposeDefaultMessageCenter();
+}
