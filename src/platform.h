@@ -39,10 +39,13 @@
 // Force inline
 #if defined(MC_COMPILER_MSVC)
   #define MC_FORCE_INLINE __forceinline
+  #define MC_NOINLINE __declspec(noinline)
 #elif defined(MC_COMPILER_GCC) || defined(MC_COMPILER_CLANG)
   #define MC_FORCE_INLINE inline __attribute__((always_inline))
+  #define MC_NOINLINE __attribute__((noinline))
 #else
   #define MC_FORCE_INLINE inline
+  #define MC_NOINLINE
 #endif
 
 // Likely/unlikely branch hints

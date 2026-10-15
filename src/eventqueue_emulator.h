@@ -166,7 +166,11 @@ public:
     msg->observerCount = count;
     msg->payloadSize = static_cast<uint8_t>(size);
 
-    std::memcpy(msg->observers, topic.observers, count * sizeof(EmuObserver));
+    if (MC_LIKELY(count == 1)) {
+      msg->observers[0] = topic.observers[0];
+    } else {
+      std::memcpy(msg->observers, topic.observers, count * sizeof(EmuObserver));
+    }
     if (data && size > 0)
       std::memcpy(msg->data, data, size);
 
@@ -194,7 +198,11 @@ public:
     msg->observerCount = count;
     msg->payloadSize = static_cast<uint8_t>(size);
 
-    std::memcpy(msg->observers, topic.observers, count * sizeof(EmuObserver));
+    if (MC_LIKELY(count == 1)) {
+      msg->observers[0] = topic.observers[0];
+    } else {
+      std::memcpy(msg->observers, topic.observers, count * sizeof(EmuObserver));
+    }
     if (data && size > 0)
       std::memcpy(msg->data, data, size);
 
@@ -233,9 +241,13 @@ public:
     msg->observerCount = count;
     msg->payloadSize = size;
 
-    std::memcpy(msg->observers, topic.observers, count * sizeof(EmuObserver));
+    if (MC_LIKELY(count == 1)) {
+      msg->observers[0] = topic.observers[0];
+    } else {
+      std::memcpy(msg->observers, topic.observers, count * sizeof(EmuObserver));
+    }
 
-    if (size <= EMU_INLINE_MAX) {
+    if (MC_LIKELY(size <= EMU_INLINE_MAX)) {
       msg->isInline = true;
       if (data && size > 0)
         std::memcpy(msg->inlineData, data, size);
@@ -269,9 +281,13 @@ public:
     msg->observerCount = count;
     msg->payloadSize = size;
 
-    std::memcpy(msg->observers, topic.observers, count * sizeof(EmuObserver));
+    if (MC_LIKELY(count == 1)) {
+      msg->observers[0] = topic.observers[0];
+    } else {
+      std::memcpy(msg->observers, topic.observers, count * sizeof(EmuObserver));
+    }
 
-    if (size <= EMU_INLINE_MAX) {
+    if (MC_LIKELY(size <= EMU_INLINE_MAX)) {
       msg->isInline = true;
       if (data && size > 0)
         std::memcpy(msg->inlineData, data, size);

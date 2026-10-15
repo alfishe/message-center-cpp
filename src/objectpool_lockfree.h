@@ -3,6 +3,8 @@
 #ifndef MESSAGE_CENTER_OBJECTPOOL_LOCKFREE_H
 #define MESSAGE_CENTER_OBJECTPOOL_LOCKFREE_H
 
+#include "platform.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -54,8 +56,8 @@ template <typename T> class ObjectPoolLockFree {
   static inline uint32_t unpackTag(uint64_t val) { return static_cast<uint32_t>(val >> 32); }
   static inline uint32_t unpackIdx(uint64_t val) { return static_cast<uint32_t>(val & 0xFFFFFFFFULL); }
 
-  inline Node *slot(uint32_t idx) const {
-    if (idx < m_baseSlots)
+  MC_FORCE_INLINE Node *slot(uint32_t idx) const {
+    if (MC_LIKELY(idx < m_baseSlots))
       return m_base + idx;
     return m_chunks[idx >> CHUNK_SHIFT].load(std::memory_order_acquire) + (idx & CHUNK_MASK);
   }
@@ -94,20 +96,20 @@ public:
   ObjectPoolLockFree(const ObjectPoolLockFree &) = delete;
   ObjectPoolLockFree &operator=(const ObjectPoolLockFree &) = delete;
 
-  T *acquire() {
+  MC_FORCE_INLINE T *acquire() {
     Node *node = popFree();
-    if (node)
+    if (MC_LIKELY(node != nullptr))
       return &node->data;
     return acquireSlow();
   }
 
-  void release(T *obj) {
-    if (!obj)
+  MC_FORCE_INLINE void release(T *obj) {
+    if (MC_UNLIKELY(!obj))
       return;
 
     // T is the first member of Node
     Node *node = reinterpret_cast<Node *>(obj);
-    if (node->slotIdx == INVALID_IDX) {
+    if (MC_UNLIKELY(node->slotIdx == INVALID_IDX)) {
       delete node;
       m_allocated.fetch_sub(1, std::memory_order_relaxed);
     } else {
@@ -120,7 +122,7 @@ public:
 
 private:
   // Cold path: grow by one chunk, or fall back to a heap overflow node.
-  T *acquireSlow() {
+  MC_NOINLINE T *acquireSlow() {
     {
       std::lock_guard<std::mutex> lock(m_growMutex);
       // Another thread may have refilled the free-list while we waited
@@ -137,7 +139,7 @@ private:
   }
 
   // Allocates one chunk. If 'takeOne', returns its first slot to the caller and pushes the rest.
-  Node *growLocked(bool takeOne) {
+  MC_NOINLINE Node *growLocked(bool takeOne) {
     const uint32_t base = static_cast<uint32_t>(m_chunksUsed * CHUNK_SIZE);
     Node *chunk = new Node[CHUNK_SIZE];
     for (uint32_t i = 0; i < CHUNK_SIZE; ++i)
@@ -158,26 +160,28 @@ private:
   void pushFree(uint32_t idx) { pushFree(slot(idx), idx); }
 
   // Hot path variant: caller already holds the Node*, so no chunk-table lookup is needed
-  void pushFree(Node *node, uint32_t idx) {
+  MC_FORCE_INLINE void pushFree(Node *node, uint32_t idx) {
     uint64_t current = m_freeHead.load(std::memory_order_relaxed);
     for (;;) {
       node->nextIdx.store(unpackIdx(current), std::memory_order_relaxed);
-      if (m_freeHead.compare_exchange_weak(current, pack(unpackTag(current) + 1, idx),
-                                           std::memory_order_release, std::memory_order_relaxed))
+      if (MC_LIKELY(m_freeHead.compare_exchange_weak(
+              current, pack(unpackTag(current) + 1, idx),
+              std::memory_order_release, std::memory_order_relaxed)))
         return;
     }
   }
 
-  Node *popFree() {
+  MC_FORCE_INLINE Node *popFree() {
     uint64_t current = m_freeHead.load(std::memory_order_acquire);
     for (;;) {
       uint32_t idx = unpackIdx(current);
-      if (idx == INVALID_IDX)
+      if (MC_UNLIKELY(idx == INVALID_IDX))
         return nullptr;
       Node *node = slot(idx);
       uint32_t nextIdx = node->nextIdx.load(std::memory_order_relaxed);
-      if (m_freeHead.compare_exchange_weak(current, pack(unpackTag(current) + 1, nextIdx),
-                                           std::memory_order_acquire, std::memory_order_acquire))
+      if (MC_LIKELY(m_freeHead.compare_exchange_weak(
+              current, pack(unpackTag(current) + 1, nextIdx),
+              std::memory_order_acquire, std::memory_order_acquire)))
         return node;
     }
   }

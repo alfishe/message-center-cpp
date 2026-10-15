@@ -3,6 +3,8 @@
 #ifndef MESSAGE_CENTER_MPMC_QUEUE_H
 #define MESSAGE_CENTER_MPMC_QUEUE_H
 
+#include "platform.h"
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -78,7 +80,7 @@ template <typename T, size_t Capacity> class MPMCQueue {
       ::operator delete(raw);
     }
 
-    bool try_push(const T &item) {
+    MC_FORCE_INLINE bool try_push(const T &item) {
       size_t tail = m_tail.load(std::memory_order_relaxed);
 
       for (;;) {
@@ -86,9 +88,9 @@ template <typename T, size_t Capacity> class MPMCQueue {
         size_t seq = slot.seq.load(std::memory_order_acquire);
         intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(tail);
 
-        if (diff == 0) {
-          if (m_tail.compare_exchange_weak(tail, tail + 1,
-                                           std::memory_order_relaxed)) {
+        if (MC_LIKELY(diff == 0)) {
+          if (MC_LIKELY(m_tail.compare_exchange_weak(
+                  tail, tail + 1, std::memory_order_relaxed))) {
             slot.data = item;
             slot.seq.store(tail + 1, std::memory_order_release);
             return true;
@@ -101,7 +103,7 @@ template <typename T, size_t Capacity> class MPMCQueue {
       }
     }
 
-    bool try_pop(T &item) {
+    MC_FORCE_INLINE bool try_pop(T &item) {
       size_t head = m_head.load(std::memory_order_relaxed);
 
       for (;;) {
@@ -110,9 +112,9 @@ template <typename T, size_t Capacity> class MPMCQueue {
         intptr_t diff =
             static_cast<intptr_t>(seq) - static_cast<intptr_t>(head + 1);
 
-        if (diff == 0) {
-          if (m_head.compare_exchange_weak(head, head + 1,
-                                           std::memory_order_relaxed)) {
+        if (MC_LIKELY(diff == 0)) {
+          if (MC_LIKELY(m_head.compare_exchange_weak(
+                  head, head + 1, std::memory_order_relaxed))) {
             item = slot.data;
             slot.seq.store(head + SEG_SIZE, std::memory_order_release);
             return true;
@@ -188,19 +190,19 @@ public:
   MPMCQueue &operator=(const MPMCQueue &) = delete;
 
   // Try to enqueue an item. Returns true on success, false if queue is full.
-  bool try_push(const T &item) {
+  MC_FORCE_INLINE bool try_push(const T &item) {
     Segment *seg = m_writeSeg.load(std::memory_order_acquire);
-    if (seg->try_push(item))
+    if (MC_LIKELY(seg->try_push(item)))
       return true;
     return (MAX_SEGS > 1) ? try_push_slow(item) : false;
   }
 
   // Try to dequeue an item. Returns true on success, false if queue is empty.
-  bool try_pop(T &item) {
+  MC_FORCE_INLINE bool try_pop(T &item) {
     Segment *seg = m_readSeg.load(std::memory_order_acquire);
-    if (seg->try_pop(item))
+    if (MC_LIKELY(seg->try_pop(item)))
       return true;
-    if (MAX_SEGS == 1 || !seg->is_sealed())
+    if (MC_LIKELY(MAX_SEGS == 1 || !seg->is_sealed()))
       return false;
     return try_pop_slow(item);
   }
@@ -231,7 +233,7 @@ public:
   }
 
 private:
-  bool try_push_slow(const T &item) {
+  MC_NOINLINE bool try_push_slow(const T &item) {
     std::lock_guard<std::mutex> lock(m_segMutex);
     for (;;) {
       Segment *seg = m_writeSeg.load(std::memory_order_relaxed);
@@ -281,7 +283,7 @@ private:
     }
   }
 
-  bool try_pop_slow(T &item) {
+  MC_NOINLINE bool try_pop_slow(T &item) {
     for (;;) {
       Segment *seg = m_readSeg.load(std::memory_order_acquire);
       while (seg->has_in_flight_write()) {

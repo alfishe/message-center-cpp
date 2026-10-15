@@ -81,8 +81,8 @@ class EventQueueBroadcastFastBatch {
   std::mutex m_topicGrowMutex;
   std::atomic<uint16_t> m_topicCount{0};
 
-  inline TopicObservers *findTopic(uint16_t topicId) const {
-    if (topicId < TOPIC_CHUNK_SIZE)
+  MC_FORCE_INLINE TopicObservers *findTopic(uint16_t topicId) const {
+    if (MC_LIKELY(topicId < TOPIC_CHUNK_SIZE))
       return &m_topicBase[topicId];
     TopicObservers *chunk = m_topicChunks[topicId >> TOPIC_CHUNK_SHIFT].load(
         std::memory_order_acquire);
@@ -243,9 +243,13 @@ public:
     msg->observerCount = count;
     msg->payloadSize = size;
 
-    std::memcpy(msg->observers, topic->observers, count * sizeof(BatchObserver));
+    if (MC_LIKELY(count == 1)) {
+      msg->observers[0] = topic->observers[0];
+    } else {
+      std::memcpy(msg->observers, topic->observers, count * sizeof(BatchObserver));
+    }
 
-    if (size <= BATCH_INLINE_MAX) {
+    if (MC_LIKELY(size <= BATCH_INLINE_MAX)) {
       msg->isInline = true;
       if (data && size > 0)
         std::memcpy(msg->inlineData, data, size);
@@ -281,9 +285,13 @@ public:
     msg->observerCount = count;
     msg->payloadSize = size;
 
-    std::memcpy(msg->observers, topic->observers, count * sizeof(BatchObserver));
+    if (MC_LIKELY(count == 1)) {
+      msg->observers[0] = topic->observers[0];
+    } else {
+      std::memcpy(msg->observers, topic->observers, count * sizeof(BatchObserver));
+    }
 
-    if (size <= BATCH_INLINE_MAX) {
+    if (MC_LIKELY(size <= BATCH_INLINE_MAX)) {
       msg->isInline = true;
       if (data && size > 0)
         std::memcpy(msg->inlineData, data, size);
@@ -319,9 +327,13 @@ public:
     msg->observerCount = count;
     msg->payloadSize = size;
 
-    std::memcpy(msg->observers, topic->observers, count * sizeof(BatchObserver));
+    if (MC_LIKELY(count == 1)) {
+      msg->observers[0] = topic->observers[0];
+    } else {
+      std::memcpy(msg->observers, topic->observers, count * sizeof(BatchObserver));
+    }
 
-    if (size <= BATCH_INLINE_MAX) {
+    if (MC_LIKELY(size <= BATCH_INLINE_MAX)) {
       msg->isInline = true;
       if (data && size > 0)
         std::memcpy(msg->inlineData, data, size);
