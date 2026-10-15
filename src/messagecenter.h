@@ -6,6 +6,14 @@
 #include <mutex>
 #include <thread>
 
+// Number of yield iterations the MessageCenter worker spins (polling a lock-free hint) before
+// blocking on its condition variable. 0 (default) = block immediately: best producer throughput
+// for bursty traffic. Small values (e.g. 64) reduce request/response latency at the cost of
+// burst throughput. Override with -DMESSAGECENTER_WORKER_SPIN=N.
+#ifndef MESSAGECENTER_WORKER_SPIN
+    #define MESSAGECENTER_WORKER_SPIN 0
+#endif
+
 class MessageCenter : public EventQueue
 {
 protected:

@@ -1,4 +1,4 @@
-﻿#ifndef MESSAGE_CENTER_COLLECTIONHELPER_H
+#ifndef MESSAGE_CENTER_COLLECTIONHELPER_H
 #define MESSAGE_CENTER_COLLECTIONHELPER_H
 
 #include <map>
@@ -85,9 +85,9 @@ inline void for_each(C& container, Function function)
     auto begin = container.begin();
     auto end = container.end();
 
-    for_each(begin, end, [&](T const & func)
+    for_each(begin, end, [&](T const & item)
     {
-        func();
+        function(item);
     });
 }
 } // End of namespace mc

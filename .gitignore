@@ -2,7 +2,12 @@
 **/.vs
 **/obj
 **/[Bb]in
-**/build
+# Build folders
+build*
+build/
+build_asan/
+build_tsan/
+**/build*
 **/output
 **/x64
 **/x86
@@ -45,3 +50,4 @@
 .localhistory/
 
 
+tests/fuzz/message_center_fuzzer

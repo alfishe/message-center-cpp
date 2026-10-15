@@ -15,6 +15,16 @@ bool EventQueue::init()
 {
     bool result = false;
 
+    m_topicsResolveMap.reserve(MAX_TOPICS);
+    for (unsigned i = 0; i < MAX_TOPICS; ++i)
+    {
+        m_topicObserversTable[i] = nullptr;
+        m_topicSnapshots[i].reset();
+    }
+    m_workerSleeping.store(false, std::memory_order_relaxed);
+    m_pendingMessages.store(false, std::memory_order_relaxed);
+    m_maxQueueSize.store(0, std::memory_order_relaxed);
+
     m_initialized = true;
 
     return result;
@@ -23,7 +33,6 @@ bool EventQueue::init()
 void EventQueue::dispose()
 {
     // Cleanup message queue
-    if (m_messageQueue.size() > 0)
     {
         std::lock_guard<std::mutex> lock(m_mutexMessages);
 
@@ -31,6 +40,11 @@ void EventQueue::dispose()
         {
             if (it != nullptr)
             {
+                if (it->cleanupPayload && it->obj != nullptr)
+                {
+                    delete it->obj;
+                    it->obj = nullptr;
+                }
                 delete it;
             }
         }
@@ -39,7 +53,6 @@ void EventQueue::dispose()
     }
 
     // Cleanup observers
-    if (m_topicObservers.size() > 0)
     {
         std::lock_guard<std::mutex> lock(m_mutexObservers);
 
@@ -51,15 +64,25 @@ void EventQueue::dispose()
                 {
                     if (observerDescriptor != nullptr)
                     {
+                        if (observerDescriptor->active)
+                        {
+                            observerDescriptor->active->store(false, std::memory_order_release);
+                        }
                         delete observerDescriptor;
                     }
                 }
 
                 it.second->clear();
+                delete it.second;
             }
         }
 
         m_topicObservers.clear();
+        for (unsigned i = 0; i < MAX_TOPICS; ++i)
+        {
+            m_topicObserversTable[i] = nullptr;
+            m_topicSnapshots[i].reset();
+        }
     }
 }
 
@@ -106,11 +129,17 @@ uint64_t EventQueue::AddObserver(const std::string& topic, ObserverCallbackFunc 
 
 uint64_t EventQueue::AddObserver(const std::string& topic, ObserverDescriptor* observer)
 {
+    if (observer == nullptr)
+        return 0;
+
     // Register Topic (or get TopicID if already registered)
     int topicId = RegisterTopic(topic);
 
     if (topicId < 0)
+    {
+        delete observer;
         return 0;  // Invalid topic
+    }
 
     // Assign unique observer ID
     uint64_t observerId = m_nextObserverId.fetch_add(1, std::memory_order_relaxed);
@@ -126,11 +155,20 @@ uint64_t EventQueue::AddObserver(const std::string& topic, ObserverDescriptor* o
             // Observers list not created yet - create vector and register it in topic-observers map collection
             observers = new ObserversVector();
             m_topicObservers.insert( {topicId, observers });
+            if (topicId >= 0 && static_cast<unsigned>(topicId) < MAX_TOPICS)
+            {
+                m_topicObserversTable[topicId] = observers;
+            }
         }
 
         if (observers != nullptr)
         {
             observers->push_back(observer);
+        }
+
+        if (topicId >= 0 && static_cast<unsigned>(topicId) < MAX_TOPICS)
+        {
+            m_topicSnapshots[topicId].reset();
         }
     }
 
@@ -158,7 +196,11 @@ void EventQueue::RemoveObserver(const std::string& topic, ObserverCallback callb
                     // Erase current element and get next iterator value
                     it = observers->erase(it);
 
-                    // Destroy descriptor object
+                    // Deactivate and destroy descriptor object
+                    if (observer->active)
+                    {
+                        observer->active->store(false, std::memory_order_release);
+                    }
                     delete observer;
                 }
                 else
@@ -166,6 +208,11 @@ void EventQueue::RemoveObserver(const std::string& topic, ObserverCallback callb
                     it++;
                 }
             }
+        }
+
+        if (result >= 0 && static_cast<unsigned>(result) < MAX_TOPICS)
+        {
+            m_topicSnapshots[result].reset();
         }
     }
 
@@ -195,7 +242,11 @@ void EventQueue::RemoveObserver(const std::string& topic, Observer* instance, Ob
                     // Erase current element and get next iterator value
                     it = observers->erase(it);
 
-                    // Destroy descriptor object
+                    // Deactivate and destroy descriptor object
+                    if (observer->active)
+                    {
+                        observer->active->store(false, std::memory_order_release);
+                    }
                     delete observer;
                 }
                 else
@@ -203,6 +254,11 @@ void EventQueue::RemoveObserver(const std::string& topic, Observer* instance, Ob
                     it++;
                 }
             }
+        }
+
+        if (result >= 0 && static_cast<unsigned>(result) < MAX_TOPICS)
+        {
+            m_topicSnapshots[result].reset();
         }
     }
 
@@ -235,7 +291,11 @@ void EventQueue::RemoveObserverById(const std::string& topic, uint64_t observerI
                     // Erase current element and get next iterator value
                     it = observers->erase(it);
 
-                    // Destroy descriptor object
+                    // Deactivate and destroy descriptor object
+                    if (observer->active)
+                    {
+                        observer->active->store(false, std::memory_order_release);
+                    }
                     delete observer;
                     break;  // IDs are unique, no need to continue
                 }
@@ -245,6 +305,11 @@ void EventQueue::RemoveObserverById(const std::string& topic, uint64_t observerI
                 }
             }
         }
+
+        if (topicId >= 0 && static_cast<unsigned>(topicId) < MAX_TOPICS)
+        {
+            m_topicSnapshots[topicId].reset();
+        }
     }
 
     // In-flight dispatches may still be invoking this observer's handler from
@@ -252,76 +317,116 @@ void EventQueue::RemoveObserverById(const std::string& topic, uint64_t observerI
     WaitForDispatchesToComplete();
 }
 
+void EventQueue::RemoveObserver(const std::string& topic, ObserverDescriptor* observer)
+{
+    if (observer == nullptr)
+        return;
+
+    int topicId = ResolveTopic(topic);
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutexObservers);
+
+        ObserverVectorPtr observers = GetObservers(topicId);
+        if (observers != nullptr)
+        {
+            ObserversVector::const_iterator it;
+            for (it = observers->begin(); it != observers->end(); )
+            {
+                ObserverDescriptor* desc = *it;
+
+                if (desc == observer || (desc != nullptr && desc->observerId == observer->observerId))
+                {
+                    it = observers->erase(it);
+                    if (desc->active)
+                    {
+                        desc->active->store(false, std::memory_order_release);
+                    }
+                    delete desc;
+                    break;
+                }
+                else
+                {
+                    it++;
+                }
+            }
+        }
+
+        if (topicId >= 0 && static_cast<unsigned>(topicId) < MAX_TOPICS)
+        {
+            m_topicSnapshots[topicId].reset();
+        }
+    }
+
+    WaitForDispatchesToComplete();
+}
+
 int EventQueue::ResolveTopic(const char* topic)
 {
-    std::string strTopic(topic);
-    int result = ResolveTopic(strTopic);
+    if (topic == nullptr || topic[0] == '\0')
+        return -1;
 
-    return result;
+    std::string strTopic(topic);
+    return ResolveTopic(strTopic);
 }
 
 
 int EventQueue::ResolveTopic(const std::string& topic)
 {
-    int result = -1;
+    if (topic.empty())
+        return -1;
 
-    if (topic.length() > 0)
+    // The registry is mutated by RegisterTopic() from any thread while
+    // Post() resolves topics from the dispatching path - guard the access
+    std::lock_guard<std::mutex> lock(m_mutexTopics);
+
+    auto it = m_topicsResolveMap.find(topic);
+    if (it != m_topicsResolveMap.end())
     {
-        // The registry is mutated by RegisterTopic() from any thread while
-        // Post() resolves topics from the dispatching path - guard the access
-        std::lock_guard<std::mutex> lock(m_mutexTopics);
-
-        if (mc::key_exists(m_topicsResolveMap, topic))
-        {
-            result = m_topicsResolveMap[topic];
-        }
+        return it->second;
     }
 
-    return result;
+    return -1;
 }
 
 int EventQueue::RegisterTopic(const char* topic)
 {
-    std::string strTopic(topic);
-    int result = RegisterTopic(strTopic);
+    if (topic == nullptr || topic[0] == '\0')
+        return -1;
 
-    return result;
+    std::string strTopic(topic);
+    return RegisterTopic(strTopic);
 }
 
 int EventQueue::RegisterTopic(const std::string& topic)
 {
-    int result = -1;
+    if (topic.empty())
+        return -1;
 
-    if (topic.length() > 0)
+    // The registry is read by ResolveTopic() from any thread - guard the access
+    std::lock_guard<std::mutex> lock(m_mutexTopics);
+
+    auto it = m_topicsResolveMap.find(topic);
+    if (it != m_topicsResolveMap.end())
     {
-        // The registry is read by ResolveTopic() from any thread - guard the access
-        std::lock_guard<std::mutex> lock(m_mutexTopics);
-
-        if (mc::key_exists(m_topicsResolveMap, topic))
-        {
-            // Already registered. Returning it's ID
-            result = m_topicsResolveMap[topic];
-        }
-        else
-        {
-            if (static_cast<unsigned>(m_topicMax) < MAX_TOPICS)
-            {
-                // Registering new ID
-                m_topicsResolveMap.insert({ topic, m_topicMax });
-                m_topics[m_topicMax] = topic;
-
-                result = m_topicMax;
-                m_topicMax++;
-            }
-            else
-            {
-                // Array for topic descriptors is full
-                result = -2;
-            }
-        }
+        // Already registered. Returning its ID
+        return it->second;
     }
 
-    return result;
+    if (static_cast<unsigned>(m_topicMax) < MAX_TOPICS)
+    {
+        // Registering new ID
+        int result = m_topicMax;
+        m_topicsResolveMap.emplace(topic, result);
+        m_topics[result] = topic;
+        m_topicMax++;
+        return result;
+    }
+    else
+    {
+        // Array for topic descriptors is full
+        return -2;
+    }
 }
 
 std::string EventQueue::GetTopicByID(int id)
@@ -341,6 +446,14 @@ std::string EventQueue::GetTopicByID(int id)
 
 void EventQueue::ClearTopics()
 {
+    {
+        std::lock_guard<std::mutex> lock(m_mutexObservers);
+        for (unsigned i = 0; i < MAX_TOPICS; ++i)
+        {
+            m_topicSnapshots[i].reset();
+        }
+    }
+
     std::lock_guard<std::mutex> lock(m_mutexTopics);
 
     m_topicsResolveMap.clear();
@@ -351,39 +464,177 @@ void EventQueue::ClearTopics()
     m_topicMax = 0;
 }
 
-void EventQueue::Post(int id, MessagePayload* obj, bool autoCleanupPayload)
+void EventQueue::SetMaxQueueSize(size_t maxQueueSize)
 {
-    if (id >= 0)
-    {
-        // Lock parallel threads to access (unique_lock can be unlocked arbitrarily)
-        std::unique_lock<std::mutex> lock(m_mutexMessages);
-
-        Message* message = new Message(id, obj, autoCleanupPayload);
-        m_messageQueue.push_back(message);
-        lock.unlock();
-
-        m_cvEvents.notify_one();
-    }
+    m_maxQueueSize.store(maxQueueSize, std::memory_order_release);
 }
 
-void EventQueue::Post(std::string topic, MessagePayload* obj, bool autoCleanupPayload)
+size_t EventQueue::GetMaxQueueSize() const
+{
+    return m_maxQueueSize.load(std::memory_order_acquire);
+}
+
+size_t EventQueue::GetQueueSize()
+{
+    std::lock_guard<std::mutex> lock(m_mutexMessages);
+    return m_messageQueue.size();
+}
+
+bool EventQueue::Post(int id, MessagePayload* obj, bool autoCleanupPayload)
+{
+    if (id < 0)
+    {
+        if (autoCleanupPayload && obj != nullptr)
+        {
+            delete obj;
+        }
+        return false;
+    }
+
+    const size_t maxQueueSize = m_maxQueueSize.load(std::memory_order_relaxed);
+    Message* message = new Message(id, obj, autoCleanupPayload);
+    bool rejected = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutexMessages);
+        if (maxQueueSize > 0 && m_messageQueue.size() >= maxQueueSize)
+        {
+            // Reject outside the lock to avoid holding m_mutexMessages during delete
+            rejected = true;
+        }
+        else
+        {
+            m_messageQueue.push_back(message);
+            m_pendingMessages.store(true, std::memory_order_release);
+        }
+    }
+
+    if (rejected)
+    {
+        if (autoCleanupPayload && obj != nullptr)
+        {
+            delete obj;
+        }
+        delete message;
+        return false;
+    }
+
+    // The worker sets m_workerSleeping under m_mutexMessages before blocking, so a push
+    // made after it blocked is guaranteed to observe the flag (no lost wakeup)
+    if (m_workerSleeping.load(std::memory_order_acquire))
+    {
+        m_cvEvents.notify_one();
+    }
+    return true;
+}
+
+bool EventQueue::Post(std::string topic, MessagePayload* obj, bool autoCleanupPayload)
 {
     int id = ResolveTopic(topic);
-    Post(id, obj, autoCleanupPayload);
+    return Post(id, obj, autoCleanupPayload);
+}
+
+size_t EventQueue::PostBatch(int id, MessagePayload* const* objs, size_t count, bool autoCleanupPayload)
+{
+    if (count == 0)
+    {
+        return 0;
+    }
+
+    if (id < 0)
+    {
+        if (autoCleanupPayload && objs != nullptr)
+        {
+            for (size_t i = 0; i < count; ++i)
+            {
+                delete objs[i];
+            }
+        }
+        return 0;
+    }
+
+    constexpr size_t CHUNK = 256;
+    Message* local[CHUNK];
+    const size_t maxQueueSize = m_maxQueueSize.load(std::memory_order_relaxed);
+    size_t done = 0;
+    size_t enqueued = 0;
+
+    while (done < count)
+    {
+        const size_t n = std::min<size_t>(count - done, CHUNK);
+        for (size_t i = 0; i < n; ++i)
+        {
+            MessagePayload* payload = (objs != nullptr) ? objs[done + i] : nullptr;
+            local[i] = new Message(id, payload, autoCleanupPayload);
+        }
+
+        size_t toPush = n;
+        {
+            std::lock_guard<std::mutex> lock(m_mutexMessages);
+            if (maxQueueSize > 0)
+            {
+                const size_t cur = m_messageQueue.size();
+                const size_t avail = (cur < maxQueueSize) ? (maxQueueSize - cur) : 0;
+                if (toPush > avail)
+                {
+                    toPush = avail;
+                }
+            }
+            if (toPush > 0)
+            {
+                m_messageQueue.insert(m_messageQueue.end(), local, local + toPush);
+                m_pendingMessages.store(true, std::memory_order_release);
+            }
+        }
+
+        enqueued += toPush;
+
+        if (toPush < n)
+        {
+            // Clean up unpushed messages from this chunk plus any remaining chunks
+            for (size_t i = toPush; i < n; ++i)
+            {
+                if (autoCleanupPayload && local[i]->obj != nullptr)
+                {
+                    delete local[i]->obj;
+                }
+                delete local[i];
+            }
+            if (autoCleanupPayload && objs != nullptr)
+            {
+                for (size_t i = done + n; i < count; ++i)
+                {
+                    delete objs[i];
+                }
+            }
+            break;
+        }
+
+        done += n;
+    }
+
+    if (enqueued > 0 && m_workerSleeping.load(std::memory_order_acquire))
+    {
+        m_cvEvents.notify_one();
+    }
+    return enqueued;
+}
+
+size_t EventQueue::PostBatch(const std::string& topic, MessagePayload* const* objs, size_t count, bool autoCleanupPayload)
+{
+    int id = ResolveTopic(topic);
+    return PostBatch(id, objs, count, autoCleanupPayload);
 }
 
 // Lookup for observer list for topic with <id>
 // Returns: ObserverVectorPtr aka vector<Observer*>
 ObserverVectorPtr EventQueue::GetObservers(int id)
 {
-    ObserverVectorPtr result = nullptr;
-
-    if (mc::key_exists(m_topicObservers, id))
+    if (id >= 0 && static_cast<unsigned>(id) < MAX_TOPICS)
     {
-        result = m_topicObservers[id];
+        return m_topicObserversTable[id];
     }
 
-    return result;
+    return nullptr;
 }
 
 // Retrieve topmost message in Message Queue
@@ -401,55 +652,70 @@ Message* EventQueue::GetQueueMessage()
     return result;
 }
 
+namespace
+{
+    // Tracks EventQueue instances currently dispatching on this thread;
+    // removals issued from a handler on the same queue must not wait for their own dispatch to complete
+    thread_local std::vector<const EventQueue*> tl_activeQueues;
+}
+
 // Dispatch message to all subscribers of the topic
 void EventQueue::Dispatch(int id, Message* message)
 {
     if (message == nullptr)
         return;
 
-    // Snapshot the observer descriptors under m_mutexObservers and register
-    // this dispatch as active before releasing the lock: AddObserver() and
-    // RemoveObserver() mutate the very same topic vectors (and erase + delete
-    // the descriptors) under that mutex, so iterating the live storage from
-    // the worker thread raced with removals and crashed on freed descriptors
-    // (segfaults observed in parallel sharded test runs). Copying descriptor
-    // VALUES also keeps a snapshot invocation valid after the originals are
-    // deleted. The lock is deliberately NOT held while handlers run, so
-    // handlers may freely call AddObserver()/RemoveObserver()/Post().
-    std::vector<ObserverDescriptor> observersSnapshot;
+    std::shared_ptr<const std::vector<ObserverDescriptor>> snapshot;
     {
         std::lock_guard<std::mutex> lock(m_mutexObservers);
 
-        ObserverVectorPtr observers = GetObservers(id);
-        if (observers != nullptr)
+        if (id >= 0 && static_cast<unsigned>(id) < MAX_TOPICS)
         {
-            observersSnapshot.reserve(observers->size());
-            for (const ObserverDescriptor* observer : *observers)
+            if (!m_topicSnapshots[id])
             {
-                if (observer != nullptr)
+                auto snap = std::make_shared<std::vector<ObserverDescriptor>>();
+                ObserverVectorPtr observers = GetObservers(id);
+                if (observers != nullptr)
                 {
-                    observersSnapshot.push_back(*observer);
+                    snap->reserve(observers->size());
+                    for (const ObserverDescriptor* observer : *observers)
+                    {
+                        if (observer != nullptr)
+                        {
+                            snap->push_back(*observer);
+                        }
+                    }
                 }
+                m_topicSnapshots[id] = snap;
             }
+            snapshot = m_topicSnapshots[id];
         }
 
         MarkDispatchActive();
     }
 
-    for (const ObserverDescriptor& observer : observersSnapshot)
+    if (snapshot)
     {
-        if (observer.callback != nullptr)
+        for (const ObserverDescriptor& observer : *snapshot)
         {
-            (*observer.callback)(id, message);
-        }
-        else if (observer.callbackMethod != nullptr && observer.observerInstance != nullptr)
-        {
-            ObserverCallbackMethod callbackMethod = observer.callbackMethod;
-            (observer.observerInstance->*callbackMethod)(id, message);
-        }
-        else if (observer.callbackFunc != nullptr)
-        {
-            (observer.callbackFunc)(id, message);
+            if (observer.active && !observer.active->load(std::memory_order_acquire))
+            {
+                continue;
+            }
+
+            if (observer.callback != nullptr)
+            {
+                (*observer.callback)(id, message);
+            }
+            else if (observer.callbackMethod != nullptr && observer.observerInstance != nullptr)
+            {
+                ObserverCallbackMethod callbackMethod = observer.callbackMethod;
+                (observer.observerInstance->*callbackMethod)(id, message);
+            }
+            else if (observer.callbackFunc != nullptr)
+            {
+                (observer.callbackFunc)(id, message);
+            }
         }
     }
 
@@ -467,31 +733,27 @@ void EventQueue::Dispatch(int id, Message* message)
     }
 }
 
-namespace
-{
-    // Set on a thread currently inside Dispatch()'s invocation loop; removals
-    // issued from a handler must not wait for their own dispatch to complete
-    thread_local bool tl_inDispatch = false;
-}
-
 void EventQueue::MarkDispatchActive()
 {
-    {
-        std::lock_guard<std::mutex> lock(m_mutexDispatches);
-        m_activeDispatches++;
-    }
-
-    tl_inDispatch = true;
+    m_activeDispatches.fetch_add(1, std::memory_order_seq_cst);
+    tl_activeQueues.push_back(this);
 }
 
 void EventQueue::MarkDispatchComplete()
 {
-    tl_inDispatch = false;
-
-    std::lock_guard<std::mutex> lock(m_mutexDispatches);
-    m_activeDispatches--;
-    if (m_activeDispatches == 0)
+    for (auto it = tl_activeQueues.rbegin(); it != tl_activeQueues.rend(); ++it)
     {
+        if (*it == this)
+        {
+            tl_activeQueues.erase(std::next(it).base());
+            break;
+        }
+    }
+
+    if (m_activeDispatches.fetch_sub(1, std::memory_order_seq_cst) == 1 &&
+        m_waitingRemovers.load(std::memory_order_seq_cst) > 0)
+    {
+        std::lock_guard<std::mutex> lock(m_mutexDispatches);
         m_cvDispatches.notify_all();
     }
 }
@@ -504,14 +766,28 @@ void EventQueue::WaitForDispatchesToComplete()
     // removed descriptor is still mid-invocation here. Callers rely on this
     // to destroy handler state (stack locals, observer instances) right
     // after removal.
-    if (tl_inDispatch)
+    for (const EventQueue* q : tl_activeQueues)
     {
-        // A handler removing an observer must not wait for its own dispatch
+        if (q == this)
+        {
+            // A handler removing an observer from this queue must not wait for its own dispatch
+            return;
+        }
+    }
+
+    if (m_activeDispatches.load(std::memory_order_seq_cst) == 0)
+    {
         return;
     }
 
-    std::unique_lock<std::mutex> lock(m_mutexDispatches);
-    m_cvDispatches.wait(lock, [this]() { return m_activeDispatches == 0; });
+    m_waitingRemovers.fetch_add(1, std::memory_order_seq_cst);
+    {
+        std::unique_lock<std::mutex> lock(m_mutexDispatches);
+        m_cvDispatches.wait(lock, [this]() {
+            return m_activeDispatches.load(std::memory_order_seq_cst) == 0;
+        });
+    }
+    m_waitingRemovers.fetch_sub(1, std::memory_order_seq_cst);
 }
 
 #ifdef _DEBUG

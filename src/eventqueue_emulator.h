@@ -59,7 +59,7 @@ struct EmuFastMessage {
   uint8_t observerCount;
   uint8_t payloadSize;  // Max 48 bytes
   EmuObserver observers[EMU_MAX_OBSERVERS];
-  alignas(8) char data[EMU_INLINE_MAX];
+  alignas(alignof(std::max_align_t)) char data[EMU_INLINE_MAX];
 };
 
 // Bulk message - supports managed payloads
@@ -71,7 +71,7 @@ struct EmuBulkMessage {
   EmuObserver observers[EMU_MAX_OBSERVERS];
   union {
     RefCountedPayload *managed;
-    alignas(8) char inlineData[EMU_INLINE_MAX];
+    alignas(alignof(std::max_align_t)) char inlineData[EMU_INLINE_MAX];
   };
 };
 
@@ -88,24 +88,48 @@ class EventQueueEmulator {
   ObjectPoolLockFree<EmuBulkMessage> m_bulkPool;
 
   struct TopicInfo {
-    TopicPriority priority;
+    TopicPriority priority{TopicPriority::Normal};
     std::atomic<uint8_t> observerCount{0};
     EmuObserver observers[EMU_MAX_OBSERVERS];
   };
 
-  alignas(64) TopicInfo m_topics[EMU_MAX_TOPICS];
+  std::unique_ptr<TopicInfo[]> m_topics{new TopicInfo[EMU_MAX_TOPICS]};
+  std::mutex m_observerMutex;
   std::atomic<uint16_t> m_topicCount{0};
+  std::atomic<size_t> m_bulkPending{0};
 
 public:
   EventQueueEmulator()
-      : m_fastPool(256, 2048), m_bulkPool(128, 4096) {}
+      : m_fastPool(std::min<size_t>(FastCapacity, 256), FastCapacity + 64),
+        m_bulkPool(std::min<size_t>(BulkCapacity, 128), BulkCapacity + 64) {}
+
+  ~EventQueueEmulator() {
+    EmuFastMessage *fastMsg = nullptr;
+    while (m_fastQueue.try_pop(fastMsg)) {
+      if (fastMsg) {
+        m_fastPool.release(fastMsg);
+      }
+    }
+    EmuBulkMessage *bulkMsg = nullptr;
+    while (m_bulkQueue.try_pop(bulkMsg)) {
+      if (bulkMsg) {
+        if (!bulkMsg->isInline && bulkMsg->managed) {
+          bulkMsg->managed->release();
+        }
+        m_bulkPool.release(bulkMsg);
+      }
+    }
+  }
 
   // Register topic with priority
   uint16_t registerTopic(TopicPriority priority = TopicPriority::Normal) {
-    uint16_t id = m_topicCount.fetch_add(1, std::memory_order_relaxed);
-    if (id >= EMU_MAX_TOPICS) {
-      m_topicCount.fetch_sub(1, std::memory_order_relaxed);
-      return UINT16_MAX;
+    uint16_t id = m_topicCount.load(std::memory_order_relaxed);
+    for (;;) {
+      if (id >= EMU_MAX_TOPICS)
+        return UINT16_MAX;
+      if (m_topicCount.compare_exchange_weak(id, static_cast<uint16_t>(id + 1),
+                                             std::memory_order_relaxed))
+        break;
     }
     m_topics[id].priority = priority;
     return id;
@@ -116,13 +140,14 @@ public:
       return false;
 
     TopicInfo &topic = m_topics[topicId];
-    uint8_t idx = topic.observerCount.load(std::memory_order_acquire);
+    std::lock_guard<std::mutex> lock(m_observerMutex);
+    uint8_t idx = topic.observerCount.load(std::memory_order_relaxed);
     if (idx >= EMU_MAX_OBSERVERS)
       return false;
 
     topic.observers[idx].callback = callback;
     topic.observers[idx].userData = userData;
-    topic.observerCount.store(idx + 1, std::memory_order_release);
+    topic.observerCount.store(static_cast<uint8_t>(idx + 1), std::memory_order_release);
     return true;
   }
 
@@ -147,6 +172,35 @@ public:
 
     while (!m_fastQueue.try_push(msg)) {
       std::this_thread::yield();
+    }
+    return true;
+  }
+
+  // Non-blocking fast post: returns false immediately if the fast queue is full
+  bool tryPostFast(uint16_t topicId, const void *data, size_t size) {
+    if (topicId >= EMU_MAX_TOPICS || size > EMU_INLINE_MAX)
+      return false;
+
+    TopicInfo &topic = m_topics[topicId];
+    uint8_t count = topic.observerCount.load(std::memory_order_acquire);
+    if (count == 0)
+      return true;
+
+    if (m_fastQueue.full())
+      return false;
+
+    EmuFastMessage *msg = m_fastPool.acquire();
+    msg->topicId = topicId;
+    msg->observerCount = count;
+    msg->payloadSize = static_cast<uint8_t>(size);
+
+    std::memcpy(msg->observers, topic.observers, count * sizeof(EmuObserver));
+    if (data && size > 0)
+      std::memcpy(msg->data, data, size);
+
+    if (!m_fastQueue.try_push(msg)) {
+      m_fastPool.release(msg);
+      return false;
     }
     return true;
   }
@@ -188,25 +242,80 @@ public:
     } else {
       msg->isInline = false;
       msg->managed = RefCountedPayload::create(data, size);
-      if (count > 1)
-        msg->managed->addRefs(count - 1);
     }
 
     while (!m_bulkQueue.try_push(msg)) {
       std::this_thread::yield();
     }
+    m_bulkPending.fetch_add(1, std::memory_order_release);
     return true;
   }
 
-  // Auto-routing post based on topic priority
+  // Non-blocking bulk post: returns false immediately if the bulk queue is full
+  bool tryPostBulk(uint16_t topicId, const void *data, size_t size) {
+    if (topicId >= EMU_MAX_TOPICS)
+      return false;
+
+    TopicInfo &topic = m_topics[topicId];
+    uint8_t count = topic.observerCount.load(std::memory_order_acquire);
+    if (count == 0)
+      return true;
+
+    if (m_bulkQueue.full())
+      return false;
+
+    EmuBulkMessage *msg = m_bulkPool.acquire();
+    msg->topicId = topicId;
+    msg->observerCount = count;
+    msg->payloadSize = size;
+
+    std::memcpy(msg->observers, topic.observers, count * sizeof(EmuObserver));
+
+    if (size <= EMU_INLINE_MAX) {
+      msg->isInline = true;
+      if (data && size > 0)
+        std::memcpy(msg->inlineData, data, size);
+    } else {
+      msg->isInline = false;
+      msg->managed = RefCountedPayload::create(data, size);
+    }
+
+    if (!m_bulkQueue.try_push(msg)) {
+      if (!msg->isInline && msg->managed)
+        msg->managed->release();
+      m_bulkPool.release(msg);
+      return false;
+    }
+    m_bulkPending.fetch_add(1, std::memory_order_release);
+    return true;
+  }
+
+  // Non-blocking auto-routing post based on topic priority.
+  // Critical topics use the inline fast queue when size <= EMU_INLINE_MAX, and
+  // seamlessly fall back to the bulk queue for occasional larger payloads so
+  // they are never denied service.
+  bool tryPost(uint16_t topicId, const void *data, size_t size) {
+    if (topicId >= EMU_MAX_TOPICS)
+      return false;
+
+    if (m_topics[topicId].priority == TopicPriority::Critical &&
+        size <= EMU_INLINE_MAX) {
+      return tryPostFast(topicId, data, size);
+    }
+    return tryPostBulk(topicId, data, size);
+  }
+
+  // Auto-routing post based on topic priority.
+  // Critical topics use the inline fast queue when size <= EMU_INLINE_MAX, and
+  // seamlessly fall back to the bulk queue for occasional larger payloads so
+  // they are never denied service.
   bool post(uint16_t topicId, const void *data, size_t size) {
     if (topicId >= EMU_MAX_TOPICS)
       return false;
 
-    if (m_topics[topicId].priority == TopicPriority::Critical) {
-      if (size <= EMU_INLINE_MAX)
-        return postFast(topicId, data, size);
-      return false;  // Critical topics can't have large payloads
+    if (m_topics[topicId].priority == TopicPriority::Critical &&
+        size <= EMU_INLINE_MAX) {
+      return postFast(topicId, data, size);
     }
     return postBulk(topicId, data, size);
   }
@@ -231,6 +340,7 @@ public:
     EmuBulkMessage *msg = nullptr;
     if (!m_bulkQueue.try_pop(msg) || !msg)
       return false;
+    m_bulkPending.fetch_sub(1, std::memory_order_relaxed);
 
     const void *data = msg->isInline ? msg->inlineData
                                       : (msg->managed ? msg->managed->data() : nullptr);
@@ -238,26 +348,31 @@ public:
     for (uint8_t i = 0; i < msg->observerCount; ++i) {
       msg->observers[i].callback(msg->topicId, data, msg->payloadSize,
                                   msg->observers[i].userData);
-
-      if (!msg->isInline && msg->managed)
-        msg->managed->release();
     }
+
+    if (!msg->isInline && msg->managed)
+      msg->managed->release();
 
     m_bulkPool.release(msg);
     return true;
   }
 
-  // Priority dispatch: drain fast queue first, then one bulk
-  // Returns number of messages dispatched
-  size_t dispatchPriority() {
+  // Priority dispatch: drain up to maxFastBurst critical messages first, then
+  // one bulk message so continuous fast traffic cannot starve (DoS) occasional
+  // larger-payload messages in the bulk queue.
+  // Returns number of messages dispatched.
+  size_t dispatchPriority(size_t maxFastBurst = 64) {
     size_t count = 0;
 
-    // Always drain all critical messages first
-    while (dispatchFast())
+    // Drain critical messages up to burst budget
+    while (count < maxFastBurst && dispatchFast())
       ++count;
 
-    // Then process one bulk message
-    if (dispatchBulk())
+    // Give the bulk queue a turn when fast queue was empty or when bulk items
+    // are waiting, so larger payloads are never starved without touching bulk
+    // queue cache lines during pure-fast frames.
+    if ((count == 0 || m_bulkPending.load(std::memory_order_acquire) != 0) &&
+        dispatchBulk())
       ++count;
 
     return count;

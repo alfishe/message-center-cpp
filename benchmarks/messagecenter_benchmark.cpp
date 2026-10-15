@@ -11,8 +11,8 @@
 // Simple payload types for benchmarking
 struct SmallPayload : public MessagePayload {
     uint32_t id;
-    uint32_t value;
-    SmallPayload(uint32_t i, uint32_t v) : id(i), value(v) {}
+    uint64_t value;
+    SmallPayload(uint32_t i, uint64_t v) : id(i), value(v) {}
 };
 
 struct MediumPayload : public MessagePayload {
@@ -38,7 +38,7 @@ static void BM_MessageCenter_Post_Small(benchmark::State& state) {
     }));
 
     for (auto _ : state) {
-        mc.Post(topicId, new SmallPayload(1, 42));
+        mc.Post(topicId, new SmallPayload(1, 42), true);
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -59,7 +59,7 @@ static void BM_MessageCenter_Post_Medium(benchmark::State& state) {
     }));
 
     for (auto _ : state) {
-        mc.Post(topicId, new MediumPayload(1));
+        mc.Post(topicId, new MediumPayload(1), true);
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -80,7 +80,7 @@ static void BM_MessageCenter_Post_Large(benchmark::State& state) {
     }));
 
     for (auto _ : state) {
-        mc.Post(topicId, new LargePayload(1));
+        mc.Post(topicId, new LargePayload(1), true);
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -105,7 +105,7 @@ static void BM_MessageCenter_FanOut(benchmark::State& state) {
     }
 
     for (auto _ : state) {
-        mc.Post(topicId, new SmallPayload(1, 42));
+        mc.Post(topicId, new SmallPayload(1, 42), true);
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -133,7 +133,7 @@ static void BM_MessageCenter_MultiTopic(benchmark::State& state) {
 
     int idx = 0;
     for (auto _ : state) {
-        mc.Post(topicIds[idx % numTopics], new SmallPayload(1, 42));
+        mc.Post(topicIds[idx % numTopics], new SmallPayload(1, 42), true);
         idx++;
     }
 
@@ -163,7 +163,7 @@ static void BM_MessageCenter_MultiProducer(benchmark::State& state) {
         for (int t = 0; t < numThreads; t++) {
             threads.emplace_back([&mc, topicId, msgsPerThread]() {
                 for (int i = 0; i < msgsPerThread; i++) {
-                    mc.Post(topicId, new SmallPayload(i, 42));
+                    mc.Post(topicId, new SmallPayload(i, 42), true);
                 }
             });
         }
@@ -217,7 +217,7 @@ static void BM_MessageCenter_Latency(benchmark::State& state) {
     for (auto _ : state) {
         received = false;
         auto start = std::chrono::steady_clock::now().time_since_epoch().count();
-        mc.Post(topicId, new SmallPayload(1, static_cast<uint32_t>(start)));
+        mc.Post(topicId, new SmallPayload(1, static_cast<uint64_t>(start)), true);
 
         while (!received) {
             std::this_thread::yield();

@@ -19,7 +19,7 @@ class RefCountedPayload {
   size_t m_size;
   // Use char[1] instead of flexible array member for MSVC compatibility
   // Actual allocation includes extra space for user data
-  alignas(8) char m_data[1];
+  alignas(alignof(std::max_align_t)) char m_data[1];
 
   RefCountedPayload(size_t size) : m_size(size) {}
 
@@ -30,10 +30,15 @@ public:
     return new (mem) RefCountedPayload(size);
   }
 
-  // Allocate and copy data
+  // Allocate and copy data (zero-initializes if data is nullptr)
   static RefCountedPayload *create(const void *data, size_t size) {
     auto *p = create(size);
-    std::memcpy(p->m_data, data, size);
+    if (size > 0) {
+      if (data)
+        std::memcpy(p->m_data, data, size);
+      else
+        std::memset(p->m_data, 0, size);
+    }
     return p;
   }
 

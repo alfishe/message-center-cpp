@@ -6,14 +6,18 @@
 #include "collectionhelper.h"
 #include "streamhelper.h"
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <cstring>
 #include <deque>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 /// region <Constants>
@@ -32,12 +36,13 @@ typedef void (Observer::* ObserverCallbackMethod)(int id, Message* message);    
 typedef std::function<void(int id, Message* message)> ObserverCallbackFunc;     // For lambda usage
 struct ObserverDescriptor
 {
-    uint64_t observerId;                    // Unique ID for reliable removal (lambdas can't be compared by address)
-    ObserverCallback* callback;
-    ObserverCallbackMethod callbackMethod;  // Uses Observer::_some_method(int id, Message* messsage) callback signature. Requires observerInstance to be defined.
-    ObserverCallbackFunc callbackFunc;
+    uint64_t observerId{0};                    // Unique ID for reliable removal (lambdas can't be compared by address)
+    ObserverCallback* callback{nullptr};
+    ObserverCallbackMethod callbackMethod{nullptr};  // Uses Observer::_some_method(int id, Message* messsage) callback signature. Requires observerInstance to be defined.
+    ObserverCallbackFunc callbackFunc{nullptr};
 
-    Observer* observerInstance;             // Used to hold class instance for callbackMethod
+    Observer* observerInstance{nullptr};             // Used to hold class instance for callbackMethod
+    std::shared_ptr<std::atomic<bool>> active{std::make_shared<std::atomic<bool>>(true)};
 };
 
 // Base class for all observer listeners. Derived class can implement method with any name
@@ -49,7 +54,7 @@ public:
 };
 
 // Topic types
-typedef std::map<std::string, int> TopicResolveMap;
+typedef std::unordered_map<std::string, int> TopicResolveMap;
 typedef std::pair<std::string, int> TopicResolveRecord;
 
 // Observer types
@@ -121,12 +126,15 @@ protected:
     // snapshot) once RemoveObserver() returns - callers routinely destroy
     // the handler's state (stack locals, observer instances) right after
     // unregistering it
-    int m_activeDispatches = 0;
+    std::atomic<int> m_activeDispatches{0};
+    std::atomic<int> m_waitingRemovers{0};
     std::mutex m_mutexDispatches;
     std::condition_variable m_cvDispatches;
 
     std::mutex m_mutexMessages;
     std::condition_variable m_cvEvents;
+    std::atomic<bool> m_workerSleeping{false};
+    std::atomic<bool> m_pendingMessages{false};   // Lock-free "queue non-empty" hint for the worker spin phase
 
 // Fields
 protected:
@@ -135,8 +143,11 @@ protected:
     int m_topicMax = 0;
 
     TopicObserversMap m_topicObservers;
+    ObserverVectorPtr m_topicObserversTable[MAX_TOPICS] = {nullptr};
+    std::shared_ptr<const std::vector<ObserverDescriptor>> m_topicSnapshots[MAX_TOPICS];
 
     MessageQueue m_messageQueue;
+    std::atomic<size_t> m_maxQueueSize{0};        // 0 = unbounded (default); > 0 = reject posts when full
 
     // Observer ID counter (monotonically increasing, never reused)
     std::atomic<uint64_t> m_nextObserverId{1};
@@ -172,8 +183,14 @@ public:
     std::string GetTopicByID(int id);
     void ClearTopics();
 
-    void Post(int id, MessagePayload* obj = nullptr, bool autoCleanupPayload = false);
-    void Post(std::string topic, MessagePayload* obj = nullptr, bool autoCleanupPayload = false);
+    void SetMaxQueueSize(size_t maxQueueSize);
+    size_t GetMaxQueueSize() const;
+    size_t GetQueueSize();
+
+    bool Post(int id, MessagePayload* obj = nullptr, bool autoCleanupPayload = false);
+    bool Post(std::string topic, MessagePayload* obj = nullptr, bool autoCleanupPayload = false);
+    size_t PostBatch(int id, MessagePayload* const* objs, size_t count, bool autoCleanupPayload = false);
+    size_t PostBatch(const std::string& topic, MessagePayload* const* objs, size_t count, bool autoCleanupPayload = false);
 
 protected:
     Message* GetQueueMessage();

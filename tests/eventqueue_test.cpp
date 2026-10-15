@@ -209,10 +209,11 @@ TEST_F(EventQueue_Test, TestObservers_Callback)
         std::cout << "[" << i << "] " << "Starting dispatch message for tid:" << message->tid << std::endl;
 #endif // _DEBUG
 
+        int messageTid = message->tid;
         queue.Dispatch(message->tid, message);
 
 #ifdef _DEBUG
-        std::cout << "End of dispatch message for tid:" << message->tid << std::endl;
+        std::cout << "End of dispatch message for tid:" << messageTid << std::endl;
 #endif // _DEBUG
     }
 
@@ -404,10 +405,11 @@ TEST_F(EventQueue_Test, TestObservers_ClassMethod)
         std::cout << "[" << i << "] " << "Starting dispatch message for tid:" << message->tid << std::endl;
 #endif // _DEBUG
 
+        int messageTid = message->tid;
         queue.Dispatch(message->tid, message);
 
 #ifdef _DEBUG
-        std::cout << "End of dispatch message for tid:" << message->tid << std::endl;
+        std::cout << "End of dispatch message for tid:" << messageTid << std::endl;
 #endif // _DEBUG
     }
 
@@ -491,10 +493,11 @@ TEST_F(EventQueue_Test, TestObservers_Lambda)
         std::cout << "[" << i << "] " << "Starting dispatch message for tid:" << message->tid << std::endl;
 #endif // _DEBUG
 
+        int messageTid = message->tid;
         queue.Dispatch(message->tid, message);
 
 #ifdef _DEBUG
-        std::cout << "End of dispatch message for tid:" << message->tid << std::endl;
+        std::cout << "End of dispatch message for tid:" << messageTid << std::endl;
 #endif // _DEBUG
     }
 

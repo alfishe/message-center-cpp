@@ -52,10 +52,9 @@ TEST_F(MemoryLeakTest, EventQueue_PayloadCleanup) {
         queue.dispose();
     }
 
-    // Note: Original EventQueue dispose() does not clean up queued messages
-    // This is expected behavior - use MessageCenter for auto-cleanup
-    // Just verify we don't crash on dispose with pending messages
-    EXPECT_TRUE(true);
+    // EventQueue dispose() cleans up queued messages with cleanupPayload=true
+    EXPECT_EQ(g_payloadDestructorCount.load(), NUM_MESSAGES)
+        << "EventQueue::dispose() must clean up undispatched messages with cleanupPayload=true";
 }
 
 // MessageCenter memory tests

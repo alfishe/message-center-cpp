@@ -27,6 +27,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # All sources in /tests and subfolders will be compiled
 file (GLOB_RECURSE SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 EXCLUDE_FILES_FROM_DIR_IN_LIST("${SOURCES}" "/build/" FALSE OUTVAR SOURCES) # Exclude /tests/build folder
+EXCLUDE_FILES_FROM_DIR_IN_LIST("${SOURCES}" "/fuzz/" FALSE OUTVAR SOURCES)  # Exclude /tests/fuzz folder (fuzzer harness)
 
 # All library sources
 file (GLOB_RECURSE ROOT_SRC ${ROOT_DIR}/src/*.cpp)

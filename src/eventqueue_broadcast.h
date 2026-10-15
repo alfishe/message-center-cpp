@@ -14,9 +14,9 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <shared_mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 // Fire-and-forget broadcast EventQueue with automatic memory management.
@@ -39,7 +39,7 @@ struct BroadcastMessage {
   size_t payloadSize;
   union {
     RefCountedPayload *managed;
-    alignas(8) char inlineData[INLINE_PAYLOAD_MAX];
+    alignas(alignof(std::max_align_t)) char inlineData[INLINE_PAYLOAD_MAX];
   };
 };
 
@@ -53,19 +53,78 @@ class EventQueueBroadcast {
   MPMCQueue<BroadcastMessage *, QueueCapacity> m_queue;
   ObjectPoolLockFree<BroadcastMessage> m_messagePool;
 
-  std::string m_topicNames[BROADCAST_MAX_TOPICS];
-  std::map<std::string, uint16_t> m_topicMap;
+  using ObserverList = std::vector<BroadcastCallback>;
+
+  struct TopicSlot {
+    std::atomic<uint8_t> count{0};
+    std::atomic<const ObserverList *> list{nullptr};
+  };
+
+  static constexpr size_t TOPIC_CHUNK_SHIFT = 6; // 64 topics per chunk
+  static constexpr size_t TOPIC_CHUNK_SIZE = 1u << TOPIC_CHUNK_SHIFT;
+  static constexpr size_t TOPIC_CHUNK_MASK = TOPIC_CHUNK_SIZE - 1;
+  static constexpr size_t TOPIC_NUM_CHUNKS =
+      BROADCAST_MAX_TOPICS / TOPIC_CHUNK_SIZE;
+
+  TopicSlot *m_topicBase{nullptr};
+  std::unique_ptr<std::atomic<TopicSlot *>[]> m_topicChunks{
+      new std::atomic<TopicSlot *>[TOPIC_NUM_CHUNKS]};
+  std::unordered_map<std::string, uint16_t> m_topicMap;
   std::atomic<uint16_t> m_topicCount{0};
   mutable std::mutex m_topicMutex;
 
-  using ObserverList = std::vector<BroadcastCallback>;
-  using ObserverListPtr = std::shared_ptr<ObserverList>;
-  std::vector<ObserverListPtr> m_observers;
+  std::vector<const ObserverList *> m_allLists; // owned snapshots, freed in dtor
   mutable std::mutex m_observerMutex;
 
+  inline TopicSlot *findTopic(uint16_t topicId) const {
+    if (topicId < TOPIC_CHUNK_SIZE)
+      return &m_topicBase[topicId];
+    TopicSlot *chunk = m_topicChunks[topicId >> TOPIC_CHUNK_SHIFT].load(
+        std::memory_order_acquire);
+    return chunk ? &chunk[topicId & TOPIC_CHUNK_MASK] : nullptr;
+  }
+
+  TopicSlot &ensureTopic(uint16_t topicId) {
+    if (topicId < TOPIC_CHUNK_SIZE)
+      return m_topicBase[topicId];
+    size_t c = topicId >> TOPIC_CHUNK_SHIFT;
+    TopicSlot *chunk = m_topicChunks[c].load(std::memory_order_acquire);
+    if (!chunk) {
+      std::lock_guard<std::mutex> lock(m_observerMutex);
+      chunk = m_topicChunks[c].load(std::memory_order_relaxed);
+      if (!chunk) {
+        chunk = new TopicSlot[TOPIC_CHUNK_SIZE]();
+        m_topicChunks[c].store(chunk, std::memory_order_release);
+      }
+    }
+    return chunk[topicId & TOPIC_CHUNK_MASK];
+  }
+
 public:
-  EventQueueBroadcast() : m_messagePool(256, 8192) {
-    m_observers.resize(BROADCAST_MAX_TOPICS);
+  EventQueueBroadcast()
+      : m_messagePool(std::min<size_t>(QueueCapacity, 256),
+                      QueueCapacity + 64),
+        m_topicBase(new TopicSlot[TOPIC_CHUNK_SIZE]()) {
+    m_topicChunks[0].store(m_topicBase, std::memory_order_relaxed);
+    for (size_t i = 1; i < TOPIC_NUM_CHUNKS; ++i)
+      m_topicChunks[i].store(nullptr, std::memory_order_relaxed);
+  }
+
+  ~EventQueueBroadcast() {
+    BroadcastMessage *msg = nullptr;
+    while (m_queue.try_pop(msg)) {
+      if (msg) {
+        if (!msg->isInline && msg->managed) {
+          msg->managed->release();
+        }
+        m_messagePool.release(msg);
+      }
+    }
+    for (const ObserverList *list : m_allLists)
+      delete list;
+    for (size_t i = 1; i < TOPIC_NUM_CHUNKS; ++i)
+      delete[] m_topicChunks[i].load(std::memory_order_relaxed);
+    delete[] m_topicBase;
   }
 
   uint16_t registerTopic(const std::string &name) {
@@ -74,12 +133,11 @@ public:
     if (it != m_topicMap.end())
       return it->second;
 
-    uint16_t id = m_topicCount.fetch_add(1, std::memory_order_relaxed);
-    if (id >= BROADCAST_MAX_TOPICS) {
-      m_topicCount.fetch_sub(1, std::memory_order_relaxed);
+    uint16_t id = m_topicCount.load(std::memory_order_relaxed);
+    if (id >= BROADCAST_MAX_TOPICS)
       return UINT16_MAX;
-    }
-    m_topicNames[id] = name;
+    m_topicCount.store(static_cast<uint16_t>(id + 1), std::memory_order_relaxed);
+    ensureTopic(id);
     m_topicMap[name] = id;
     return id;
   }
@@ -93,12 +151,17 @@ public:
   void addObserver(uint16_t topicId, BroadcastCallback callback) {
     if (topicId >= BROADCAST_MAX_TOPICS)
       return;
+    TopicSlot &slot = ensureTopic(topicId);
     std::lock_guard<std::mutex> lock(m_observerMutex);
-    ObserverListPtr current = std::atomic_load(&m_observers[topicId]);
-    ObserverListPtr next = current ? std::make_shared<ObserverList>(*current)
-                                   : std::make_shared<ObserverList>();
+    const ObserverList *current = slot.list.load(std::memory_order_relaxed);
+    ObserverList *next =
+        current ? new ObserverList(*current) : new ObserverList();
     next->push_back(std::move(callback));
-    std::atomic_store(&m_observers[topicId], next);
+    m_allLists.push_back(next);
+    slot.list.store(next, std::memory_order_release);
+    uint8_t newCount =
+        static_cast<uint8_t>(std::min(next->size(), size_t(255)));
+    slot.count.store(newCount, std::memory_order_release);
   }
 
   void addObserver(const std::string &topic, BroadcastCallback callback) {
@@ -113,8 +176,8 @@ public:
     if (topicId >= BROADCAST_MAX_TOPICS)
       return false;
 
-    ObserverListPtr observers = std::atomic_load(&m_observers[topicId]);
-    uint8_t count = observers ? static_cast<uint8_t>(std::min(observers->size(), size_t(255))) : 0;
+    TopicSlot *slot = findTopic(topicId);
+    uint8_t count = slot ? slot->count.load(std::memory_order_acquire) : 0;
 
     if (count == 0)
       return true; // No observers, nothing to do
@@ -130,16 +193,50 @@ public:
       if (data && size > 0)
         std::memcpy(msg->inlineData, data, size);
     } else {
-      // Large payload: allocate managed
+      // Large payload: allocate managed (owned by message, refcount=1)
       msg->isInline = false;
       msg->managed = RefCountedPayload::create(data, size);
-      // Add refs for all observers (payload starts with refcount=1)
-      if (count > 1)
-        msg->managed->addRefs(count - 1);
     }
 
     while (!m_queue.try_push(msg))
       std::this_thread::yield();
+    return true;
+  }
+
+  // Non-blocking variant: returns false immediately if the ring buffer is full
+  bool tryPost(uint16_t topicId, const void *data, size_t size) {
+    if (topicId >= BROADCAST_MAX_TOPICS)
+      return false;
+
+    TopicSlot *slot = findTopic(topicId);
+    uint8_t count = slot ? slot->count.load(std::memory_order_acquire) : 0;
+
+    if (count == 0)
+      return true;
+
+    if (m_queue.full())
+      return false;
+
+    BroadcastMessage *msg = m_messagePool.acquire();
+    msg->topicId = topicId;
+    msg->observerCount = count;
+    msg->payloadSize = size;
+
+    if (size <= INLINE_PAYLOAD_MAX) {
+      msg->isInline = true;
+      if (data && size > 0)
+        std::memcpy(msg->inlineData, data, size);
+    } else {
+      msg->isInline = false;
+      msg->managed = RefCountedPayload::create(data, size);
+    }
+
+    if (!m_queue.try_push(msg)) {
+      if (!msg->isInline && msg->managed)
+        msg->managed->release();
+      m_messagePool.release(msg);
+      return false;
+    }
     return true;
   }
 
@@ -181,7 +278,9 @@ public:
     if (!m_queue.try_pop(msg) || !msg)
       return false;
 
-    ObserverListPtr observers = std::atomic_load(&m_observers[msg->topicId]);
+    TopicSlot *slot = findTopic(msg->topicId);
+    const ObserverList *observers =
+        slot ? slot->list.load(std::memory_order_acquire) : nullptr;
 
     const void *data = nullptr;
     if (msg->isInline) {
@@ -193,17 +292,12 @@ public:
     if (observers) {
       for (const auto &cb : *observers) {
         cb(msg->topicId, data, msg->payloadSize);
+      }
+    }
 
-        // For managed payloads, release one ref per observer
-        if (!msg->isInline && msg->managed) {
-          msg->managed->release();
-        }
-      }
-    } else if (!msg->isInline && msg->managed) {
-      // No observers but payload allocated - release all refs
-      for (int i = 0; i < msg->observerCount; ++i) {
-        msg->managed->release();
-      }
+    // For managed payloads, release the message's reference once
+    if (!msg->isInline && msg->managed) {
+      msg->managed->release();
     }
 
     m_messagePool.release(msg);
@@ -224,7 +318,10 @@ public:
   size_t observerCount(uint16_t topicId) const {
     if (topicId >= BROADCAST_MAX_TOPICS)
       return 0;
-    ObserverListPtr obs = std::atomic_load(&m_observers[topicId]);
+    TopicSlot *slot = findTopic(topicId);
+    if (!slot)
+      return 0;
+    const ObserverList *obs = slot->list.load(std::memory_order_acquire);
     return obs ? obs->size() : 0;
   }
 };
