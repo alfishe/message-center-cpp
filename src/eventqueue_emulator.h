@@ -102,7 +102,12 @@ class EventQueueEmulator {
 public:
   EventQueueEmulator()
       : m_fastPool(std::min<size_t>(FastCapacity, 256), FastCapacity + 64),
-        m_bulkPool(std::min<size_t>(BulkCapacity, 128), BulkCapacity + 64) {}
+        m_bulkPool(std::min<size_t>(BulkCapacity, 128), BulkCapacity + 64) {
+    // Default predefined EmuTopics::VBLANK (0) .. FRAME_READY (4) to Critical
+    for (uint16_t i = 0; i <= 4 && i < EMU_MAX_TOPICS; ++i) {
+      m_topics[i].priority = TopicPriority::Critical;
+    }
+  }
 
   ~EventQueueEmulator() {
     EmuFastMessage *fastMsg = nullptr;
@@ -136,9 +141,35 @@ public:
     return id;
   }
 
+  bool setTopicPriority(uint16_t topicId, TopicPriority priority) {
+    if (topicId >= EMU_MAX_TOPICS)
+      return false;
+    m_topics[topicId].priority = priority;
+    uint16_t cur = m_topicCount.load(std::memory_order_relaxed);
+    while (cur <= topicId &&
+           !m_topicCount.compare_exchange_weak(
+               cur, static_cast<uint16_t>(topicId + 1),
+               std::memory_order_relaxed)) {
+    }
+    return true;
+  }
+
+  TopicPriority getTopicPriority(uint16_t topicId) const {
+    if (topicId >= EMU_MAX_TOPICS)
+      return TopicPriority::Normal;
+    return m_topics[topicId].priority;
+  }
+
   bool addObserver(uint16_t topicId, EmuCallback callback, void *userData = nullptr) {
     if (topicId >= EMU_MAX_TOPICS)
       return false;
+
+    uint16_t cur = m_topicCount.load(std::memory_order_relaxed);
+    while (cur <= topicId &&
+           !m_topicCount.compare_exchange_weak(
+               cur, static_cast<uint16_t>(topicId + 1),
+               std::memory_order_relaxed)) {
+    }
 
     TopicInfo &topic = m_topics[topicId];
     std::lock_guard<std::mutex> lock(m_observerMutex);
@@ -150,6 +181,35 @@ public:
     topic.observers[idx].userData = userData;
     topic.observerCount.store(static_cast<uint8_t>(idx + 1), std::memory_order_release);
     return true;
+  }
+
+  bool removeObserver(uint16_t topicId, EmuCallback callback, void *userData = nullptr) {
+    if (topicId >= EMU_MAX_TOPICS)
+      return false;
+
+    TopicInfo &topic = m_topics[topicId];
+    std::lock_guard<std::mutex> lock(m_observerMutex);
+    uint8_t count = topic.observerCount.load(std::memory_order_relaxed);
+    for (uint8_t i = 0; i < count; ++i) {
+      if (topic.observers[i].callback == callback &&
+          topic.observers[i].userData == userData) {
+        for (uint8_t j = i; j + 1 < count; ++j)
+          topic.observers[j] = topic.observers[j + 1];
+        topic.observers[count - 1] = {nullptr, nullptr};
+        topic.observerCount.store(static_cast<uint8_t>(count - 1),
+                                  std::memory_order_release);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void clearObservers(uint16_t topicId) {
+    if (topicId >= EMU_MAX_TOPICS)
+      return;
+    TopicInfo &topic = m_topics[topicId];
+    std::lock_guard<std::mutex> lock(m_observerMutex);
+    topic.observerCount.store(0, std::memory_order_release);
   }
 
   // Fast post for critical events - inline only, fails if payload > 48B
@@ -486,13 +546,7 @@ public:
 
     // Drain fast queue completely in batches
     for (;;) {
-      size_t batchSize = 0;
-      while (batchSize < DRAIN_CHUNK) {
-        EmuFastMessage *msg = nullptr;
-        if (!m_fastQueue.try_pop(msg) || !msg)
-          break;
-        fastBatch[batchSize++] = msg;
-      }
+      size_t batchSize = m_fastQueue.try_pop_batch(fastBatch, DRAIN_CHUNK);
       if (batchSize == 0)
         break;
       for (size_t i = 0; i < batchSize; ++i) {
@@ -512,13 +566,7 @@ public:
     // Then drain bulk queue in batches
     if (m_bulkPending.load(std::memory_order_acquire) != 0) {
       for (;;) {
-        size_t batchSize = 0;
-        while (batchSize < DRAIN_CHUNK) {
-          EmuBulkMessage *msg = nullptr;
-          if (!m_bulkQueue.try_pop(msg) || !msg)
-            break;
-          bulkBatch[batchSize++] = msg;
-        }
+        size_t batchSize = m_bulkQueue.try_pop_batch(bulkBatch, DRAIN_CHUNK);
         if (batchSize == 0)
           break;
         m_bulkPending.fetch_sub(batchSize, std::memory_order_relaxed);
@@ -584,6 +632,13 @@ public:
 
   size_t fastQueueSize() const { return m_fastQueue.size_approx(); }
   size_t bulkQueueSize() const { return m_bulkQueue.size_approx(); }
+  uint16_t topicCount() const { return m_topicCount.load(std::memory_order_relaxed); }
+
+  size_t observerCount(uint16_t topicId) const {
+    if (topicId >= EMU_MAX_TOPICS)
+      return 0;
+    return m_topics[topicId].observerCount.load(std::memory_order_acquire);
+  }
 };
 
 // Pre-defined topic IDs for common emulator events

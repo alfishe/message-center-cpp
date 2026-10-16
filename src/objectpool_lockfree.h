@@ -112,6 +112,17 @@ public:
     return acquireSlow();
   }
 
+  // Batch acquire: pops up to 'count' pooled nodes from m_freeHead with a
+  // single atomic CAS, falling back to acquire() if the pool needs to grow.
+  MC_FORCE_INLINE void acquireBatch(T **outObjs, size_t count) {
+    if (MC_UNLIKELY(count == 0))
+      return;
+    size_t got = popFreeBatch(outObjs, count);
+    while (MC_UNLIKELY(got < count)) {
+      outObjs[got++] = acquire();
+    }
+  }
+
   MC_FORCE_INLINE void release(T *obj) {
     if (MC_UNLIKELY(!obj))
       return;
@@ -236,6 +247,26 @@ private:
               current, pack(unpackTag(current) + 1, nextIdx),
               std::memory_order_acquire, std::memory_order_acquire)))
         return node;
+    }
+  }
+
+  MC_FORCE_INLINE size_t popFreeBatch(T **outObjs, size_t maxCount) {
+    uint64_t current = m_freeHead.load(std::memory_order_acquire);
+    for (;;) {
+      uint32_t idx = unpackIdx(current);
+      if (MC_UNLIKELY(idx == INVALID_IDX))
+        return 0;
+      size_t n = 0;
+      uint32_t walkIdx = idx;
+      while (n < maxCount && walkIdx != INVALID_IDX) {
+        Node *node = slot(walkIdx);
+        outObjs[n++] = &node->data;
+        walkIdx = node->nextIdx.load(std::memory_order_relaxed);
+      }
+      if (MC_LIKELY(m_freeHead.compare_exchange_weak(
+              current, pack(unpackTag(current) + 1, walkIdx),
+              std::memory_order_acquire, std::memory_order_acquire)))
+        return n;
     }
   }
 };

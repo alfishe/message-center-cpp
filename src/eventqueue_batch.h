@@ -112,6 +112,8 @@ class EventQueueBroadcastFastBatch {
     EventQueueBroadcastFastBatch *owner = nullptr;
     BatchMessage *msgs[BATCH_SIZE];
     size_t count = 0;
+    BatchMessage *freeMsgs[BATCH_SIZE];
+    size_t freeCount = 0;
 
     ~BatchBuffer() {
       if (owner) {
@@ -124,9 +126,13 @@ class EventQueueBroadcastFastBatch {
   std::vector<BatchBuffer *> m_threadBuffers; // guarded by m_topicGrowMutex
 
   void pushBufferMessages(BatchBuffer &buf) {
-    for (size_t i = 0; i < buf.count; ++i) {
-      while (!m_queue.try_push(buf.msgs[i])) {
+    size_t pushed = 0;
+    while (pushed < buf.count) {
+      size_t n = m_queue.try_push_batch(buf.msgs + pushed, buf.count - pushed);
+      if (n == 0) {
         std::this_thread::yield();
+      } else {
+        pushed += n;
       }
     }
     buf.count = 0;
@@ -134,6 +140,10 @@ class EventQueueBroadcastFastBatch {
 
   void detachThreadBuffer(BatchBuffer *buf) {
     pushBufferMessages(*buf);
+    if (buf->freeCount > 0) {
+      m_messagePool.releaseBatch(buf->freeMsgs, buf->freeCount);
+      buf->freeCount = 0;
+    }
     std::lock_guard<std::mutex> lock(m_topicGrowMutex);
     for (auto it = m_threadBuffers.begin(); it != m_threadBuffers.end(); ++it) {
       if (*it == buf) {
@@ -166,6 +176,10 @@ public:
   ~EventQueueBroadcastFastBatch() {
     if (t_batch.owner == this) {
       pushBufferMessages(t_batch);
+      if (t_batch.freeCount > 0) {
+        m_messagePool.releaseBatch(t_batch.freeMsgs, t_batch.freeCount);
+        t_batch.freeCount = 0;
+      }
     }
     {
       std::lock_guard<std::mutex> lock(m_topicGrowMutex);
@@ -177,6 +191,10 @@ public:
               m->managed->release();
             m_messagePool.release(m);
           }
+        }
+        if (buf->freeCount > 0) {
+          m_messagePool.releaseBatch(buf->freeMsgs, buf->freeCount);
+          buf->freeCount = 0;
         }
         buf->count = 0;
         buf->owner = nullptr;
@@ -224,6 +242,38 @@ public:
     topic.observers[idx].userData = userData;
     topic.count.store(static_cast<uint8_t>(idx + 1), std::memory_order_release);
     return true;
+  }
+
+  bool removeObserver(uint16_t topicId, BatchCallback callback, void *userData = nullptr) {
+    if (topicId >= BATCH_MAX_TOPICS)
+      return false;
+    TopicObservers *topic = findTopic(topicId);
+    if (!topic)
+      return false;
+    std::lock_guard<std::mutex> lock(m_topicGrowMutex);
+    uint8_t count = topic->count.load(std::memory_order_relaxed);
+    for (uint8_t i = 0; i < count; ++i) {
+      if (topic->observers[i].callback == callback &&
+          topic->observers[i].userData == userData) {
+        for (uint8_t j = i; j + 1 < count; ++j)
+          topic->observers[j] = topic->observers[j + 1];
+        topic->observers[count - 1] = {nullptr, nullptr};
+        topic->count.store(static_cast<uint8_t>(count - 1),
+                           std::memory_order_release);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void clearObservers(uint16_t topicId) {
+    if (topicId >= BATCH_MAX_TOPICS)
+      return;
+    TopicObservers *topic = findTopic(topicId);
+    if (!topic)
+      return;
+    std::lock_guard<std::mutex> lock(m_topicGrowMutex);
+    topic->count.store(0, std::memory_order_release);
   }
 
   // Regular post - immediate queue push
@@ -327,7 +377,16 @@ public:
     if (count == 0)
       return true;
 
-    BatchMessage *msg = m_messagePool.acquire();
+    BatchBuffer &buf = t_batch;
+    if (MC_UNLIKELY(buf.owner != this)) {
+      bindThreadBuffer(buf);
+    }
+    if (MC_UNLIKELY(buf.freeCount == 0)) {
+      m_messagePool.acquireBatch(buf.freeMsgs, BATCH_SIZE);
+      buf.freeCount = BATCH_SIZE;
+    }
+
+    BatchMessage *msg = buf.freeMsgs[--buf.freeCount];
     msg->topicId = topicId;
     msg->observerCount = count;
     msg->payloadSize = size;
@@ -349,22 +408,19 @@ public:
       msg->managed = RefCountedPayload::create(data, size);
     }
 
-    if (t_batch.owner != this) {
-      bindThreadBuffer(t_batch);
-    }
+    buf.msgs[buf.count++] = msg;
 
-    t_batch.msgs[t_batch.count++] = msg;
-
-    if (t_batch.count >= BATCH_SIZE) {
-      pushBufferMessages(t_batch);
+    if (MC_UNLIKELY(buf.count >= BATCH_SIZE)) {
+      pushBufferMessages(buf);
     }
     return true;
   }
 
   // Flush batched messages to queue
   void flushBatch() {
-    if (t_batch.owner == this && t_batch.count > 0) {
-      pushBufferMessages(t_batch);
+    BatchBuffer &buf = t_batch;
+    if (buf.owner == this && buf.count > 0) {
+      pushBufferMessages(buf);
     }
   }
 
@@ -439,15 +495,8 @@ public:
     while (totalDispatched < maxCount) {
       // Pre-fetch messages into local buffer
       BatchMessage *batch[BATCH_SIZE];
-      size_t batchSize = 0;
       size_t toPop = std::min(maxCount - totalDispatched, BATCH_SIZE);
-
-      while (batchSize < toPop) {
-        BatchMessage *msg = nullptr;
-        if (!m_queue.try_pop(msg) || !msg)
-          break;
-        batch[batchSize++] = msg;
-      }
+      size_t batchSize = m_queue.try_pop_batch(batch, toPop);
 
       if (batchSize == 0)
         break;
@@ -489,6 +538,14 @@ public:
 
   bool empty() const { return m_queue.empty(); }
   size_t queueSize() const { return m_queue.size_approx(); }
+  uint16_t topicCount() const { return m_topicCount.load(std::memory_order_relaxed); }
+
+  size_t observerCount(uint16_t topicId) const {
+    if (topicId >= BATCH_MAX_TOPICS)
+      return 0;
+    TopicObservers *topic = findTopic(topicId);
+    return topic ? topic->count.load(std::memory_order_acquire) : 0;
+  }
 };
 
 template <size_t QueueCapacity>

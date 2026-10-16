@@ -75,10 +75,12 @@ class EventQueueBroadcast {
   mutable std::mutex m_topicMutex;
 
   std::vector<const ObserverList *> m_allLists; // owned snapshots, freed in dtor
+  std::unordered_map<uint16_t, std::vector<uint64_t>> m_observerIds;
+  uint64_t m_nextObserverId{1};
   mutable std::mutex m_observerMutex;
 
-  inline TopicSlot *findTopic(uint16_t topicId) const {
-    if (topicId < TOPIC_CHUNK_SIZE)
+  MC_FORCE_INLINE TopicSlot *findTopic(uint16_t topicId) const {
+    if (MC_LIKELY(topicId < TOPIC_CHUNK_SIZE))
       return &m_topicBase[topicId];
     TopicSlot *chunk = m_topicChunks[topicId >> TOPIC_CHUNK_SHIFT].load(
         std::memory_order_acquire);
@@ -149,26 +151,85 @@ public:
     return (it != m_topicMap.end()) ? it->second : UINT16_MAX;
   }
 
-  void addObserver(uint16_t topicId, BroadcastCallback callback) {
+  uint64_t addObserver(uint16_t topicId, BroadcastCallback callback) {
     if (topicId >= BROADCAST_MAX_TOPICS)
-      return;
+      return 0;
     TopicSlot &slot = ensureTopic(topicId);
     std::lock_guard<std::mutex> lock(m_observerMutex);
+    uint64_t obsId = m_nextObserverId++;
     const ObserverList *current = slot.list.load(std::memory_order_relaxed);
     ObserverList *next =
         current ? new ObserverList(*current) : new ObserverList();
     next->push_back(std::move(callback));
+    m_observerIds[topicId].push_back(obsId);
     m_allLists.push_back(next);
     slot.list.store(next, std::memory_order_release);
     uint8_t newCount =
         static_cast<uint8_t>(std::min(next->size(), size_t(255)));
     slot.count.store(newCount, std::memory_order_release);
+    return obsId;
   }
 
-  void addObserver(const std::string &topic, BroadcastCallback callback) {
+  uint64_t addObserver(const std::string &topic, BroadcastCallback callback) {
     uint16_t id = registerTopic(topic);
+    return (id != UINT16_MAX) ? addObserver(id, std::move(callback)) : 0;
+  }
+
+  bool removeObserver(uint16_t topicId, uint64_t observerId) {
+    if (topicId >= BROADCAST_MAX_TOPICS || observerId == 0)
+      return false;
+    TopicSlot *slot = findTopic(topicId);
+    if (!slot)
+      return false;
+    std::lock_guard<std::mutex> lock(m_observerMutex);
+    auto it = m_observerIds.find(topicId);
+    if (it == m_observerIds.end())
+      return false;
+    auto &ids = it->second;
+    const ObserverList *current = slot->list.load(std::memory_order_relaxed);
+    if (!current || current->size() != ids.size())
+      return false;
+    for (size_t i = 0; i < ids.size(); ++i) {
+      if (ids[i] == observerId) {
+        ObserverList *next = new ObserverList();
+        next->reserve(current->size() - 1);
+        for (size_t j = 0; j < current->size(); ++j) {
+          if (j != i)
+            next->push_back((*current)[j]);
+        }
+        ids.erase(ids.begin() + static_cast<std::ptrdiff_t>(i));
+        m_allLists.push_back(next);
+        slot->list.store(next, std::memory_order_release);
+        uint8_t newCount =
+            static_cast<uint8_t>(std::min(next->size(), size_t(255)));
+        slot->count.store(newCount, std::memory_order_release);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool removeObserver(const std::string &topic, uint64_t observerId) {
+    uint16_t id = resolveTopic(topic);
+    return (id != UINT16_MAX) ? removeObserver(id, observerId) : false;
+  }
+
+  void clearObservers(uint16_t topicId) {
+    if (topicId >= BROADCAST_MAX_TOPICS)
+      return;
+    TopicSlot *slot = findTopic(topicId);
+    if (!slot)
+      return;
+    std::lock_guard<std::mutex> lock(m_observerMutex);
+    m_observerIds.erase(topicId);
+    slot->count.store(0, std::memory_order_release);
+    slot->list.store(nullptr, std::memory_order_release);
+  }
+
+  void clearObservers(const std::string &topic) {
+    uint16_t id = resolveTopic(topic);
     if (id != UINT16_MAX)
-      addObserver(id, std::move(callback));
+      clearObservers(id);
   }
 
   // === FIRE AND FORGET API ===
@@ -188,7 +249,7 @@ public:
     msg->observerCount = count;
     msg->payloadSize = size;
 
-    if (size <= INLINE_PAYLOAD_MAX) {
+    if (MC_LIKELY(size <= INLINE_PAYLOAD_MAX)) {
       // Small payload: copy inline (or zero-init if data is nullptr)
       msg->isInline = true;
       if (MC_LIKELY(data != nullptr && size > 0))
@@ -225,7 +286,7 @@ public:
     msg->observerCount = count;
     msg->payloadSize = size;
 
-    if (size <= INLINE_PAYLOAD_MAX) {
+    if (MC_LIKELY(size <= INLINE_PAYLOAD_MAX)) {
       msg->isInline = true;
       if (MC_LIKELY(data != nullptr && size > 0))
         std::memcpy(msg->inlineData, data, size);
@@ -353,10 +414,62 @@ public:
     return true;
   }
 
+  // Batch dispatch - process up to maxCount messages and return pooled nodes
+  // with a single atomic CAS per chunk.
+  size_t dispatchBatch(size_t maxCount) {
+    static constexpr size_t DRAIN_CHUNK = 32;
+    BroadcastMessage *batch[DRAIN_CHUNK];
+    size_t dispatched = 0;
+
+    while (dispatched < maxCount) {
+      size_t limit = std::min(maxCount - dispatched, DRAIN_CHUNK);
+      size_t batchSize = m_queue.try_pop_batch(batch, limit);
+      if (batchSize == 0)
+        break;
+
+      uint16_t cachedTopicId = UINT16_MAX;
+      const ObserverList *cachedObservers = nullptr;
+      for (size_t i = 0; i < batchSize; ++i) {
+        BroadcastMessage *msg = batch[i];
+        uint16_t tid = msg->topicId;
+        if (MC_UNLIKELY(tid != cachedTopicId)) {
+          cachedTopicId = tid;
+          TopicSlot *slot = findTopic(tid);
+          cachedObservers =
+              slot ? slot->list.load(std::memory_order_acquire) : nullptr;
+        }
+        const void *data =
+            msg->isInline ? msg->inlineData
+                          : (msg->managed ? msg->managed->data() : nullptr);
+        if (cachedObservers) {
+          for (const auto &cb : *cachedObservers) {
+            cb(tid, data, msg->payloadSize);
+          }
+        }
+        if (!msg->isInline && msg->managed)
+          msg->managed->release();
+      }
+
+      if (batchSize == 1)
+        m_messagePool.release(batch[0]);
+      else
+        m_messagePool.releaseBatch(batch, batchSize);
+
+      dispatched += batchSize;
+      if (batchSize < limit)
+        break;
+    }
+    return dispatched;
+  }
+
   size_t dispatchAll() {
     size_t count = 0;
-    while (dispatchOne())
-      ++count;
+    for (;;) {
+      size_t n = dispatchBatch(32);
+      if (n == 0)
+        break;
+      count += n;
+    }
     return count;
   }
 

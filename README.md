@@ -20,10 +20,11 @@ See [Choosing a Queue](doc/CHOOSING_A_QUEUE.md) for variant comparison, [Perform
 
 | Queue Variant | Single-Thread / Frame Burst | Multi-Threaded (2P+8C) P50 | Multi-Threaded P999 | Stack Footprint | Best For |
 |---------------|-----------------------------|----------------------------|---------------------|-----------------|----------|
-| `EventQueueBroadcastFast` | **60.7–67.8 M/s** (~15 ns) | **1.2 μs** (5.75 M/s) | 144 μs | **0.30 KB** (64 KB initial heap) | General-purpose lock-free |
-| `EventQueueBroadcastFastBatch` | **39.2–42.2 M/s** (~24 ns) | 1.2 μs (5.44 M/s) | **76 μs** | **0.30 KB** (64 KB initial heap) | Low tail latency |
-| `EventQueueEmulator` | **61.7–69.5 M/s** (~15 ns) | **0.17 μs** (128 M/s) | 130 μs | **0.56 KB** (128 KB initial heap) | Emulators / games |
-| `MessageCenterFast` | **24.6 M/s** (~40 ns) | **1.11 μs** | — | **0.75 KB** (64 KB initial heap) | Async worker + lock-free |
+| `EventQueueBroadcastFast` | **61.3–69.2 M/s** (~14.5 ns) | **1.2 μs** (5.75 M/s) | 144 μs | **0.30 KB** (64 KB initial heap) | General-purpose lock-free |
+| `EventQueueBroadcastFastBatch` | **52.7–61.6 M/s** (~16 ns) | 1.2 μs (5.44 M/s) | **76 μs** | **0.30 KB** (64 KB initial heap) | Low tail latency |
+| `EventQueueBroadcast` | **71.3–75.6 M/s** (~13.5 ns, batch) | ~1.5 μs | — | **0.42 KB** (64 KB initial heap) | Lambdas / `std::function` |
+| `EventQueueEmulator` | **63.0–69.5 M/s** (~14.4 ns) | **0.17 μs** (128 M/s) | 130 μs | **0.56 KB** (128 KB initial heap) | Emulators / games |
+| `MessageCenterFast` | **19.5–24.4 M/s** (~41 ns) | **1.11 μs** | — | **0.76 KB** (64 KB initial heap) | Async worker + lock-free |
 | `MessageCenter` (mutex) | **4.3–5.5 M/s** (`PostBatch`) | ~12–15 μs | — | **0.65 KB** | High-level app / UI events |
 
 ### Comparison to Alternatives

@@ -789,4 +789,226 @@ TEST(ReworkRegression, GetTopicByIdZeroAndOutOfRangePostAndObjectPoolClear) {
         mc.stop();
         EXPECT_EQ(verified.load(), 4);
     }
+
+    // 4. EventQueueBroadcast::dispatchBatch partial and full batch drains
+    {
+        EventQueueBroadcast<64> q;
+        uint16_t t = q.registerTopic("batch.drain");
+        uint64_t sum = 0;
+        q.addObserver(t, [&](uint16_t, const void* data, size_t size) {
+            if (size == sizeof(uint32_t)) {
+                sum += *static_cast<const uint32_t*>(data);
+            }
+        });
+        for (uint32_t i = 1; i <= 50; ++i) {
+            EXPECT_TRUE(q.post(t, i));
+        }
+        EXPECT_EQ(q.dispatchBatch(10), 10u);
+        EXPECT_EQ(q.dispatchBatch(35), 35u);
+        EXPECT_EQ(q.dispatchAll(), 5u);
+        EXPECT_EQ(sum, (50u * 51u) / 2u);
+    }
+
+    // 5. ObjectPoolLockFree::acquireBatch + releaseBatch & MPMCQueue::try_push_batch / try_pop_batch
+    {
+        ObjectPoolLockFree<uint64_t> pool(16, 128);
+        uint64_t* items[48] = {};
+        pool.acquireBatch(items, 48); // Crosses initial 64-slot chunk and grows
+        for (size_t i = 0; i < 48; ++i) {
+            ASSERT_NE(items[i], nullptr);
+            *items[i] = i + 100;
+        }
+        pool.releaseBatch(items, 48);
+
+        MPMCQueue<uint32_t, 2048> q; // 2 segments of 1024
+        uint32_t inBatch[64];
+        uint32_t outBatch[64];
+        for (uint32_t b = 0; b < 24; ++b) { // 24 * 64 = 1536 items (crosses segment boundary)
+            for (uint32_t i = 0; i < 64; ++i) {
+                inBatch[i] = b * 64 + i;
+            }
+            EXPECT_EQ(q.try_push_batch(inBatch, 64), 64u);
+        }
+        uint32_t expected = 0;
+        while (!q.empty()) {
+            size_t popped = q.try_pop_batch(outBatch, 64);
+            ASSERT_GT(popped, 0u);
+            for (size_t i = 0; i < popped; ++i) {
+                EXPECT_EQ(outBatch[i], expected++);
+            }
+        }
+        EXPECT_EQ(expected, 1536u);
+    }
+
+    // 6. MessageCenterFast no-observer fast path, observerCount(), and topicCount()
+    {
+        MessageCenterFast mc;
+        uint16_t tNoObs = mc.registerTopic("no.observers");
+        uint16_t tWithObs = mc.registerTopic("with.observers");
+        EXPECT_EQ(mc.topicCount(), 2u);
+        EXPECT_EQ(mc.observerCount(tNoObs), 0u);
+        EXPECT_EQ(mc.observerCount(tWithObs), 0u);
+
+        // Posting to a topic with 0 observers must succeed without enqueuing
+        int val = 42;
+        EXPECT_TRUE(mc.post(tNoObs, val));
+        EXPECT_TRUE(mc.tryPost(tNoObs, val));
+        EXPECT_EQ(mc.pending(), 0u);
+
+        std::atomic<int> count{0};
+        mc.addObserver(tWithObs, [&](uint16_t, const void*, size_t) {
+            count.fetch_add(1, std::memory_order_relaxed);
+        });
+        EXPECT_EQ(mc.observerCount(tWithObs), 1u);
+        mc.start();
+        EXPECT_TRUE(mc.post(tWithObs, val));
+        mc.flush(1000);
+        mc.stop();
+        EXPECT_EQ(count.load(), 1);
+    }
+}
+
+namespace {
+void incrementIntCb(uint16_t, const void*, size_t, void* user) {
+    ++(*static_cast<int*>(user));
+}
+} // namespace
+
+TEST(ReworkRegression, LockFreeQueues_RemoveObserverClearObserversAndEmuTopics) {
+    // 1. EventQueueBroadcast: removeObserver by ID and clearObservers
+    {
+        EventQueueBroadcast<64> q;
+        uint16_t t = q.registerTopic("obs.bcast");
+        int c1 = 0, c2 = 0;
+        uint64_t id1 = q.addObserver(t, [&](uint16_t, const void*, size_t) { ++c1; });
+        uint64_t id2 = q.addObserver("obs.bcast", [&](uint16_t, const void*, size_t) { ++c2; });
+        EXPECT_NE(id1, 0u);
+        EXPECT_NE(id2, 0u);
+        EXPECT_EQ(q.observerCount(t), 2u);
+
+        EXPECT_TRUE(q.post(t, 1));
+        EXPECT_EQ(q.dispatchAll(), 1u);
+        EXPECT_EQ(c1, 1);
+        EXPECT_EQ(c2, 1);
+
+        EXPECT_TRUE(q.removeObserver(t, id1));
+        EXPECT_FALSE(q.removeObserver(t, id1)); // already removed
+        EXPECT_EQ(q.observerCount(t), 1u);
+
+        EXPECT_TRUE(q.post(t, 2));
+        EXPECT_EQ(q.dispatchAll(), 1u);
+        EXPECT_EQ(c1, 1);
+        EXPECT_EQ(c2, 2);
+
+        q.clearObservers("obs.bcast");
+        EXPECT_EQ(q.observerCount(t), 0u);
+        EXPECT_TRUE(q.post(t, 3));
+        EXPECT_EQ(q.dispatchAll(), 0u); // no observers -> fast no-op
+        EXPECT_EQ(c2, 2);
+    }
+
+    // 2. EventQueueBroadcastFast: removeObserver(callback, userData) and clearObservers
+    {
+        EventQueueBroadcastFast<64> q;
+        uint16_t t = q.registerTopic();
+        int c1 = 0, c2 = 0;
+        EXPECT_TRUE(q.addObserver(t, &incrementIntCb, &c1));
+        EXPECT_TRUE(q.addObserver(t, &incrementIntCb, &c2));
+        EXPECT_EQ(q.observerCount(t), 2u);
+
+        EXPECT_TRUE(q.removeObserver(t, &incrementIntCb, &c1));
+        EXPECT_FALSE(q.removeObserver(t, &incrementIntCb, &c1));
+        EXPECT_EQ(q.observerCount(t), 1u);
+
+        EXPECT_TRUE(q.post(t, 1));
+        EXPECT_EQ(q.dispatchAll(), 1u);
+        EXPECT_EQ(c1, 0);
+        EXPECT_EQ(c2, 1);
+
+        q.clearObservers(t);
+        EXPECT_EQ(q.observerCount(t), 0u);
+    }
+
+    // 3. EventQueueBroadcastFastBatch: removeObserver(callback, userData) and clearObservers
+    {
+        EventQueueBroadcastFastBatch<64> q;
+        uint16_t t = q.registerTopic();
+        int c1 = 0, c2 = 0;
+        EXPECT_TRUE(q.addObserver(t, &incrementIntCb, &c1));
+        EXPECT_TRUE(q.addObserver(t, &incrementIntCb, &c2));
+        EXPECT_EQ(q.observerCount(t), 2u);
+
+        EXPECT_TRUE(q.removeObserver(t, &incrementIntCb, &c1));
+        EXPECT_EQ(q.observerCount(t), 1u);
+
+        EXPECT_TRUE(q.postBatched(t, 1));
+        q.flushBatch();
+        EXPECT_EQ(q.dispatchAll(), 1u);
+        EXPECT_EQ(c1, 0);
+        EXPECT_EQ(c2, 1);
+
+        q.clearObservers(t);
+        EXPECT_EQ(q.observerCount(t), 0u);
+    }
+
+    // 4. EventQueueEmulator: EmuTopics default priorities, collision avoidance, removeObserver
+    {
+        EventQueueEmulator<64, 64> q;
+        EXPECT_EQ(q.getTopicPriority(EmuTopics::VBLANK), TopicPriority::Critical);
+        EXPECT_EQ(q.getTopicPriority(EmuTopics::AUDIO_SYNC), TopicPriority::Critical);
+        EXPECT_EQ(q.getTopicPriority(EmuTopics::FRAME_READY), TopicPriority::Critical);
+        EXPECT_EQ(q.getTopicPriority(EmuTopics::CPU_TRACE), TopicPriority::Normal);
+        EXPECT_EQ(q.getTopicPriority(EmuTopics::SCREENSHOT), TopicPriority::Normal);
+
+        int vblankCount = 0, shotCount = 0;
+        EXPECT_TRUE(q.addObserver(EmuTopics::VBLANK, &incrementIntCb, &vblankCount));
+        EXPECT_TRUE(q.addObserver(EmuTopics::SCREENSHOT, &incrementIntCb, &shotCount));
+
+        // Subsequent registerTopic() must start after EmuTopics::SCREENSHOT (8)
+        uint16_t dynamicTopic = q.registerTopic(TopicPriority::Critical);
+        EXPECT_GT(dynamicTopic, EmuTopics::SCREENSHOT);
+
+        // Auto-routing post(EmuTopics::VBLANK, ...) must route to the fast queue
+        EXPECT_TRUE(q.post(EmuTopics::VBLANK, 123));
+        EXPECT_EQ(q.fastQueueSize(), 1u);
+        EXPECT_EQ(q.bulkQueueSize(), 0u);
+        EXPECT_TRUE(q.dispatchFast());
+        EXPECT_EQ(vblankCount, 1);
+
+        EXPECT_TRUE(q.removeObserver(EmuTopics::VBLANK, &incrementIntCb, &vblankCount));
+        EXPECT_EQ(q.observerCount(EmuTopics::VBLANK), 0u);
+        q.clearObservers(EmuTopics::SCREENSHOT);
+        EXPECT_EQ(q.observerCount(EmuTopics::SCREENSHOT), 0u);
+    }
+
+    // 5. MessageCenterFast: removeObserver by ID and clearObservers
+    {
+        MessageCenterFast mc;
+        mc.start();
+        uint16_t t = mc.registerTopic("obs.mcfast");
+        std::atomic<int> c1{0}, c2{0};
+        uint64_t id1 = mc.addObserver(t, [&](uint16_t, const void*, size_t) {
+            c1.fetch_add(1, std::memory_order_relaxed);
+        });
+        uint64_t id2 = mc.addObserver("obs.mcfast", [&](uint16_t, const void*, size_t) {
+            c2.fetch_add(1, std::memory_order_relaxed);
+        });
+        EXPECT_EQ(mc.observerCount(t), 2u);
+
+        EXPECT_TRUE(mc.removeObserver(t, id1));
+        EXPECT_EQ(mc.observerCount(t), 1u);
+
+        EXPECT_TRUE(mc.post(t, 42));
+        mc.flush(1000);
+        EXPECT_EQ(c1.load(), 0);
+        EXPECT_EQ(c2.load(), 1);
+
+        mc.clearObservers("obs.mcfast");
+        EXPECT_EQ(mc.observerCount(t), 0u);
+        EXPECT_TRUE(mc.post(t, 42));
+        mc.flush(1000);
+        mc.stop();
+        EXPECT_EQ(c2.load(), 1);
+        (void)id2;
+    }
 }

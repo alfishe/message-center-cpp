@@ -58,6 +58,7 @@ using ObserverCallbackFast = std::function<void(uint16_t topicId, const void* da
 struct ObserverEntryFast {
     ObserverCallbackFast callback;
     void* userData;
+    uint64_t id;
 };
 
 class MessageCenterFast {
@@ -70,6 +71,7 @@ private:
     using ObserverList = std::vector<ObserverEntryFast>;
 
     struct TopicSlot {
+        std::atomic<uint8_t> count{0};
         std::atomic<const ObserverList*> list{nullptr};
     };
 
@@ -87,6 +89,7 @@ private:
     std::atomic<uint16_t> m_nextTopicId{0};
 
     std::vector<const ObserverList*> m_allLists;
+    uint64_t m_nextObserverId{1};
     std::mutex m_observerMutex;
 
     std::mutex m_lifecycleMutex;
@@ -266,27 +269,77 @@ public:
         return (it != m_topicMap.end()) ? it->second : UINT16_MAX;
     }
 
-    void addObserver(uint16_t topicId, ObserverCallbackFast callback, void* userData = nullptr) {
-        if (topicId >= MC_FAST_MAX_TOPICS) return;
+    uint64_t addObserver(uint16_t topicId, ObserverCallbackFast callback, void* userData = nullptr) {
+        if (topicId >= MC_FAST_MAX_TOPICS) return 0;
 
         TopicSlot& slot = ensureTopic(topicId);
         std::lock_guard<std::mutex> lock(m_observerMutex);
+        uint64_t obsId = m_nextObserverId++;
         const ObserverList* current = slot.list.load(std::memory_order_relaxed);
         ObserverList* next = current ? new ObserverList(*current) : new ObserverList();
-        next->push_back({std::move(callback), userData});
+        next->push_back({std::move(callback), userData, obsId});
         m_allLists.push_back(next);
         slot.list.store(next, std::memory_order_release);
+        uint8_t newCount = static_cast<uint8_t>(std::min(next->size(), size_t(255)));
+        slot.count.store(newCount, std::memory_order_release);
+        return obsId;
     }
 
-    void addObserver(const std::string& topic, ObserverCallbackFast callback, void* userData = nullptr) {
+    uint64_t addObserver(const std::string& topic, ObserverCallbackFast callback, void* userData = nullptr) {
         uint16_t id = registerTopic(topic);
-        if (id != UINT16_MAX) {
-            addObserver(id, std::move(callback), userData);
+        return (id != UINT16_MAX) ? addObserver(id, std::move(callback), userData) : 0;
+    }
+
+    bool removeObserver(uint16_t topicId, uint64_t observerId) {
+        if (topicId >= MC_FAST_MAX_TOPICS || observerId == 0) return false;
+        TopicSlot* slot = findTopic(topicId);
+        if (!slot) return false;
+        std::lock_guard<std::mutex> lock(m_observerMutex);
+        const ObserverList* current = slot->list.load(std::memory_order_relaxed);
+        if (!current) return false;
+        for (size_t i = 0; i < current->size(); ++i) {
+            if ((*current)[i].id == observerId) {
+                ObserverList* next = new ObserverList();
+                next->reserve(current->size() - 1);
+                for (size_t j = 0; j < current->size(); ++j) {
+                    if (j != i) next->push_back((*current)[j]);
+                }
+                m_allLists.push_back(next);
+                slot->list.store(next, std::memory_order_release);
+                uint8_t newCount = static_cast<uint8_t>(std::min(next->size(), size_t(255)));
+                slot->count.store(newCount, std::memory_order_release);
+                return true;
+            }
         }
+        return false;
+    }
+
+    bool removeObserver(const std::string& topic, uint64_t observerId) {
+        uint16_t id = resolveTopic(topic);
+        return (id != UINT16_MAX) ? removeObserver(id, observerId) : false;
+    }
+
+    void clearObservers(uint16_t topicId) {
+        if (topicId >= MC_FAST_MAX_TOPICS) return;
+        TopicSlot* slot = findTopic(topicId);
+        if (!slot) return;
+        std::lock_guard<std::mutex> lock(m_observerMutex);
+        slot->count.store(0, std::memory_order_release);
+        slot->list.store(nullptr, std::memory_order_release);
+    }
+
+    void clearObservers(const std::string& topic) {
+        uint16_t id = resolveTopic(topic);
+        if (id != UINT16_MAX) clearObservers(id);
     }
 
     bool post(uint16_t topicId, const void* data, size_t size) {
         if (MC_UNLIKELY(topicId >= MC_FAST_MAX_TOPICS)) return false;
+
+        TopicSlot* slot = findTopic(topicId);
+        if (!slot || slot->count.load(std::memory_order_acquire) == 0)
+            return true;
+
         if (MC_UNLIKELY(size > MC_FAST_INLINE_SIZE) && m_queue.full() &&
             (!m_running.load(std::memory_order_relaxed) ||
              m_stopping.load(std::memory_order_relaxed))) {
@@ -365,6 +418,11 @@ public:
     // Non-blocking variant: returns false immediately if the ring buffer is full
     bool tryPost(uint16_t topicId, const void* data, size_t size) {
         if (MC_UNLIKELY(topicId >= MC_FAST_MAX_TOPICS)) return false;
+
+        TopicSlot* slot = findTopic(topicId);
+        if (!slot || slot->count.load(std::memory_order_acquire) == 0)
+            return true;
+
         if (MC_UNLIKELY(m_queue.full())) return false;
 
         MessageFast* msg = m_pool.acquire();
@@ -465,6 +523,18 @@ public:
         return m_posted.load(std::memory_order_relaxed) - m_dispatched.load(std::memory_order_relaxed);
     }
 
+    uint16_t topicCount() const {
+        return m_nextTopicId.load(std::memory_order_relaxed);
+    }
+
+    size_t observerCount(uint16_t topicId) const {
+        if (topicId >= MC_FAST_MAX_TOPICS) return 0;
+        TopicSlot* slot = findTopic(topicId);
+        if (!slot) return 0;
+        const ObserverList* obs = slot->list.load(std::memory_order_acquire);
+        return obs ? obs->size() : 0;
+    }
+
     void flush(uint32_t timeoutMs = 5000) {
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
         int spinCount = 0;
@@ -480,33 +550,63 @@ public:
     }
 
 private:
+    MC_FORCE_INLINE void dispatchBatchMessages(MessageFast** batch, size_t batchSize) {
+        uint16_t cachedTopicId = UINT16_MAX;
+        const ObserverList* cachedSnapshot = nullptr;
+        for (size_t i = 0; i < batchSize; ++i) {
+            MessageFast* msg = batch[i];
+            if (MC_LIKELY(msg != nullptr)) {
+                uint16_t tid = msg->topicId;
+                if (MC_UNLIKELY(tid != cachedTopicId)) {
+                    cachedTopicId = tid;
+                    TopicSlot* slot = (tid < MC_FAST_MAX_TOPICS) ? findTopic(tid) : nullptr;
+                    cachedSnapshot = slot ? slot->list.load(std::memory_order_acquire) : nullptr;
+                }
+                if (cachedSnapshot) {
+                    const void* data = msg->data();
+                    size_t size = msg->size;
+                    for (const auto& entry : *cachedSnapshot) {
+                        if (entry.callback) {
+                            entry.callback(tid, data, size);
+                        }
+                    }
+                }
+                msg->reset();
+            }
+        }
+    }
+
     void dispatchLoop() {
         static constexpr size_t WORKER_BATCH_SIZE = 32;
+        static constexpr size_t RECYCLE_BATCH_SIZE = 32;
         MessageFast* batch[WORKER_BATCH_SIZE];
+        MessageFast* recycleBuf[RECYCLE_BATCH_SIZE];
+        size_t recycleCount = 0;
         int emptyCount = 0;
 
         while (!m_stopping.load(std::memory_order_acquire)) {
-            size_t batchSize = 0;
-            while (batchSize < WORKER_BATCH_SIZE) {
-                MessageFast* msg = nullptr;
-                if (!m_queue.try_pop(msg) || !msg)
-                    break;
-                batch[batchSize++] = msg;
-            }
+            size_t batchSize = m_queue.try_pop_batch(batch, WORKER_BATCH_SIZE);
 
             if (batchSize > 0) {
-                for (size_t i = 0; i < batchSize; ++i) {
-                    dispatch(batch[i]);
-                    batch[i]->reset();
-                }
-                m_pool.releaseBatch(batch, batchSize);
+                dispatchBatchMessages(batch, batchSize);
                 m_dispatched.fetch_add(batchSize, std::memory_order_relaxed);
+                for (size_t i = 0; i < batchSize; ++i) {
+                    recycleBuf[recycleCount++] = batch[i];
+                    if (MC_UNLIKELY(recycleCount == RECYCLE_BATCH_SIZE)) {
+                        m_pool.releaseBatch(recycleBuf, recycleCount);
+                        recycleCount = 0;
+                    }
+                }
                 emptyCount = 0;
             } else {
                 emptyCount++;
                 if (emptyCount < 100) {
                     std::this_thread::yield();
                 } else {
+                    if (recycleCount > 0) {
+                        m_pool.releaseBatch(recycleBuf, recycleCount);
+                        recycleCount = 0;
+                    }
                     std::unique_lock<std::mutex> lock(m_cvMutex);
                     m_sleeping.store(true, std::memory_order_seq_cst);
                     m_cv.wait_for(lock, std::chrono::milliseconds(10), [this]() {
@@ -517,20 +617,16 @@ private:
             }
         }
 
+        if (recycleCount > 0) {
+            m_pool.releaseBatch(recycleBuf, recycleCount);
+            recycleCount = 0;
+        }
+
         for (;;) {
-            size_t batchSize = 0;
-            while (batchSize < WORKER_BATCH_SIZE) {
-                MessageFast* msg = nullptr;
-                if (!m_queue.try_pop(msg) || !msg)
-                    break;
-                batch[batchSize++] = msg;
-            }
+            size_t batchSize = m_queue.try_pop_batch(batch, WORKER_BATCH_SIZE);
             if (batchSize == 0)
                 break;
-            for (size_t i = 0; i < batchSize; ++i) {
-                dispatch(batch[i]);
-                batch[i]->reset();
-            }
+            dispatchBatchMessages(batch, batchSize);
             m_pool.releaseBatch(batch, batchSize);
             m_dispatched.fetch_add(batchSize, std::memory_order_relaxed);
         }

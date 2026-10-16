@@ -2,9 +2,16 @@
 cmake_minimum_required (VERSION 3.13)
 project (message-center)
 
-# Build options
-option(BUILD_TESTS "Build unit tests" ON)
-option(BENCHMARK "Execute benchmarks" ON)
+if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+    set(MC_IS_TOP_LEVEL ON)
+else ()
+    set(MC_IS_TOP_LEVEL OFF)
+endif ()
+
+# Build options (default ON for top-level builds, OFF when embedded via add_subdirectory/FetchContent)
+option(BUILD_TESTS "Build unit tests" ${MC_IS_TOP_LEVEL})
+option(BENCHMARK "Execute benchmarks" ${MC_IS_TOP_LEVEL})
+option(BUILD_BENCHMARKS "Alias for BENCHMARK" ${BENCHMARK})
 option(BUILD_EXAMPLES "Build examples" OFF)
 
 # Default to Release mode
@@ -36,9 +43,9 @@ if (BUILD_TESTS)
 endif (BUILD_TESTS)
 
 # Benchmarks
-if (BENCHMARK)
+if (BENCHMARK AND BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
-endif (BENCHMARK)
+endif ()
 
 # Examples
 if (BUILD_EXAMPLES)

@@ -127,6 +127,57 @@ template <typename T, size_t Capacity> class MPMCQueue {
       }
     }
 
+    MC_FORCE_INLINE size_t try_push_batch(const T *items, size_t count) {
+      size_t pushed = 0;
+      size_t tail = m_tail.load(std::memory_order_relaxed);
+
+      while (pushed < count) {
+        Slot &slot = m_slots[tail & SEG_MASK];
+        size_t seq = slot.seq.load(std::memory_order_acquire);
+        intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(tail);
+
+        if (MC_LIKELY(diff == 0)) {
+          if (MC_LIKELY(m_tail.compare_exchange_weak(
+                  tail, tail + 1, std::memory_order_relaxed))) {
+            slot.data = items[pushed++];
+            slot.seq.store(tail + 1, std::memory_order_release);
+            ++tail;
+          }
+        } else if (diff < 0) {
+          break;
+        } else {
+          tail = m_tail.load(std::memory_order_relaxed);
+        }
+      }
+      return pushed;
+    }
+
+    MC_FORCE_INLINE size_t try_pop_batch(T *items, size_t maxCount) {
+      size_t popped = 0;
+      size_t head = m_head.load(std::memory_order_relaxed);
+
+      while (popped < maxCount) {
+        Slot &slot = m_slots[head & SEG_MASK];
+        size_t seq = slot.seq.load(std::memory_order_acquire);
+        intptr_t diff =
+            static_cast<intptr_t>(seq) - static_cast<intptr_t>(head + 1);
+
+        if (MC_LIKELY(diff == 0)) {
+          if (MC_LIKELY(m_head.compare_exchange_weak(
+                  head, head + 1, std::memory_order_relaxed))) {
+            items[popped++] = slot.data;
+            slot.seq.store(head + SEG_SIZE, std::memory_order_release);
+            ++head;
+          }
+        } else if (diff < 0) {
+          break;
+        } else {
+          head = m_head.load(std::memory_order_relaxed);
+        }
+      }
+      return popped;
+    }
+
     bool has_in_flight_write() const {
       size_t head = m_head.load(std::memory_order_acquire);
       size_t tail = m_tail.load(std::memory_order_acquire) & ~SEALED_BIT;
@@ -205,6 +256,37 @@ public:
     if (MC_LIKELY(MAX_SEGS == 1 || !seg->is_sealed()))
       return false;
     return try_pop_slow(item);
+  }
+
+  // Try to enqueue up to 'count' items. Returns number of items enqueued.
+  MC_FORCE_INLINE size_t try_push_batch(const T *items, size_t count) {
+    if (MC_UNLIKELY(count == 0))
+      return 0;
+    Segment *seg = m_writeSeg.load(std::memory_order_acquire);
+    size_t pushed = seg->try_push_batch(items, count);
+    while (MC_UNLIKELY(pushed < count)) {
+      if (MAX_SEGS > 1 && try_push_slow(items[pushed])) {
+        ++pushed;
+        seg = m_writeSeg.load(std::memory_order_acquire);
+        pushed += seg->try_push_batch(items + pushed, count - pushed);
+      } else {
+        break;
+      }
+    }
+    return pushed;
+  }
+
+  // Try to dequeue up to 'maxCount' items. Returns number of items dequeued.
+  MC_FORCE_INLINE size_t try_pop_batch(T *items, size_t maxCount) {
+    if (MC_UNLIKELY(maxCount == 0))
+      return 0;
+    Segment *seg = m_readSeg.load(std::memory_order_acquire);
+    size_t popped = seg->try_pop_batch(items, maxCount);
+    if (MC_LIKELY(popped > 0 || MAX_SEGS == 1 || !seg->is_sealed()))
+      return popped;
+    if (try_pop_slow(items[0]))
+      return 1;
+    return 0;
   }
 
   // Approximate size (may be stale)

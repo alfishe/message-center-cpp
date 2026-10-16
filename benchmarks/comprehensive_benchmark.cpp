@@ -207,6 +207,28 @@ static void BM_ArchCompare_BroadcastBatch_Inline32(benchmark::State& state) {
 }
 BENCHMARK(BM_ArchCompare_BroadcastBatch_Inline32);
 
+// 3.3b EventQueueBroadcast (std::function, Inline 32B, Batch 32)
+static void BM_ArchCompare_Broadcast_Batch32(benchmark::State& state) {
+    EventQueueBroadcast<65536> queue;
+    uint16_t tid = queue.registerTopic("bench.broadcast.batch");
+    uint64_t count = 0;
+    queue.addObserver(tid, [&count](uint16_t, const void*, size_t) {
+        ++count;
+    });
+
+    SmallPayload32 payload{1, 2, 3, 4};
+
+    for (auto _ : state) {
+        for (int i = 0; i < 32; i++) {
+            queue.post(tid, payload);
+        }
+        queue.dispatchAll();
+    }
+    benchmark::DoNotOptimize(count);
+    state.SetItemsProcessed(state.iterations() * 32);
+}
+BENCHMARK(BM_ArchCompare_Broadcast_Batch32);
+
 // 3.4 EventQueueEmulator (Dual Queue Priority)
 static void BM_ArchCompare_Emulator_CriticalPriority(benchmark::State& state) {
     EventQueueEmulator<4096, 16384> queue;

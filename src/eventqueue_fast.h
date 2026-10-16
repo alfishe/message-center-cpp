@@ -171,6 +171,38 @@ public:
     return true;
   }
 
+  bool removeObserver(uint16_t topicId, FastCallback callback, void *userData = nullptr) {
+    if (topicId >= FAST_MAX_TOPICS)
+      return false;
+    TopicObservers *topic = findTopic(topicId);
+    if (!topic)
+      return false;
+    std::lock_guard<std::mutex> lock(m_topicGrowMutex);
+    uint8_t count = topic->count.load(std::memory_order_relaxed);
+    for (uint8_t i = 0; i < count; ++i) {
+      if (topic->observers[i].callback == callback &&
+          topic->observers[i].userData == userData) {
+        for (uint8_t j = i; j + 1 < count; ++j)
+          topic->observers[j] = topic->observers[j + 1];
+        topic->observers[count - 1] = {nullptr, nullptr};
+        topic->count.store(static_cast<uint8_t>(count - 1),
+                           std::memory_order_release);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void clearObservers(uint16_t topicId) {
+    if (topicId >= FAST_MAX_TOPICS)
+      return;
+    TopicObservers *topic = findTopic(topicId);
+    if (!topic)
+      return;
+    std::lock_guard<std::mutex> lock(m_topicGrowMutex);
+    topic->count.store(0, std::memory_order_release);
+  }
+
   // Hot path - minimal overhead post
   bool post(uint16_t topicId, const void *data, size_t size) {
     if (topicId >= FAST_MAX_TOPICS)
@@ -322,13 +354,7 @@ public:
 
     while (dispatched < maxCount) {
       size_t limit = std::min(maxCount - dispatched, DRAIN_CHUNK);
-      size_t batchSize = 0;
-      while (batchSize < limit) {
-        FastMessage *msg = nullptr;
-        if (!m_queue.try_pop(msg) || !msg)
-          break;
-        batch[batchSize++] = msg;
-      }
+      size_t batchSize = m_queue.try_pop_batch(batch, limit);
       if (batchSize == 0)
         break;
 
@@ -369,6 +395,14 @@ public:
 
   bool empty() const { return m_queue.empty(); }
   size_t queueSize() const { return m_queue.size_approx(); }
+  uint16_t topicCount() const { return m_topicCount.load(std::memory_order_relaxed); }
+
+  size_t observerCount(uint16_t topicId) const {
+    if (topicId >= FAST_MAX_TOPICS)
+      return 0;
+    TopicObservers *topic = findTopic(topicId);
+    return topic ? topic->count.load(std::memory_order_acquire) : 0;
+  }
 };
 
 #endif // MESSAGE_CENTER_EVENTQUEUE_FAST_H
