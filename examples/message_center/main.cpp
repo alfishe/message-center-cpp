@@ -29,11 +29,13 @@ struct GameEvent : public MessagePayload {
 class GameLogger : public Observer {
 public:
     void onPlayerMoved(int id, Message* msg) {
+        (void)id;
         auto* e = static_cast<PlayerMoved*>(msg->obj);
         printf("[Logger] Player %u moved to (%.1f, %.1f)\n", e->playerId, e->x, e->y);
     }
 
     void onPlayerHealth(int id, Message* msg) {
+        (void)id;
         auto* e = static_cast<PlayerHealth*>(msg->obj);
         printf("[Logger] Player %u health: %d/%d\n", e->playerId, e->health, e->maxHealth);
     }
@@ -57,6 +59,7 @@ int main() {
 
     // Subscribe with lambda - logging (explicit std::function to avoid ambiguity)
     mc.AddObserver("game.event", ObserverCallbackFunc([](int id, Message* msg) {
+        (void)id;
         auto* e = static_cast<GameEvent*>(msg->obj);
         printf("[Event] %s\n", e->eventName);
     }));
@@ -64,6 +67,7 @@ int main() {
     // Subscribe with lambda - boundary checker
     float maxX = 100.0f, maxY = 100.0f;
     mc.AddObserver("player.moved", ObserverCallbackFunc([maxX, maxY](int id, Message* msg) {
+        (void)id;
         auto* e = static_cast<PlayerMoved*>(msg->obj);
         if (e->x > maxX || e->y > maxY) {
             printf("[Bounds] Player %u out of bounds!\n", e->playerId);
@@ -72,6 +76,7 @@ int main() {
 
     // Subscribe with lambda - health warning
     mc.AddObserver("player.health", ObserverCallbackFunc([](int id, Message* msg) {
+        (void)id;
         auto* e = static_cast<PlayerHealth*>(msg->obj);
         if (e->health < e->maxHealth / 4) {
             printf("[Warning] Player %u health critical!\n", e->playerId);

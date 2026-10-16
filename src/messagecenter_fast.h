@@ -16,6 +16,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -347,6 +348,96 @@ public:
             id = registerTopic(topic);
         }
         return post(id, data, size);
+    }
+
+    // Non-blocking variant: returns false immediately if the ring buffer is full
+    bool tryPost(uint16_t topicId, const void* data, size_t size) {
+        if (topicId >= MC_FAST_MAX_TOPICS) return false;
+        if (m_queue.full()) return false;
+
+        MessageFast* msg = m_pool.acquire();
+        if (msg == nullptr) return false;
+
+        msg->topicId = topicId;
+        msg->size = static_cast<uint32_t>(size);
+
+        if (size <= MC_FAST_INLINE_SIZE) {
+            msg->flags = 0;
+            if (data && size > 0) {
+                memcpy(msg->inlineData, data, size);
+            }
+        } else {
+            msg->flags = 1;
+            msg->managedData = malloc(size);
+            if (msg->managedData && data) {
+                memcpy(msg->managedData, data, size);
+            }
+        }
+
+        if (!m_queue.try_push(msg)) {
+            msg->reset();
+            m_pool.release(msg);
+            return false;
+        }
+
+        m_posted.fetch_add(1, std::memory_order_seq_cst);
+        if (m_sleeping.load(std::memory_order_seq_cst)) {
+            { std::lock_guard<std::mutex> lock(m_cvMutex); }
+            m_cv.notify_one();
+        }
+        return true;
+    }
+
+    bool tryPost(const std::string& topic, const void* data, size_t size) {
+        uint16_t id = resolveTopic(topic);
+        if (id == UINT16_MAX) {
+            id = registerTopic(topic);
+        }
+        return tryPost(id, data, size);
+    }
+
+    template <typename T>
+    bool post(uint16_t topicId, const T& value) {
+        static_assert(std::is_trivially_copyable<T>::value,
+                      "T must be trivially copyable");
+        static_assert(!std::is_pointer<T>::value,
+                      "Do not pass a pointer to typed post(); pass the value by reference or use post(topicId, ptr, size)");
+        return post(topicId, &value, sizeof(T));
+    }
+
+    template <typename T>
+    bool post(const std::string& topic, const T& value) {
+        static_assert(std::is_trivially_copyable<T>::value,
+                      "T must be trivially copyable");
+        static_assert(!std::is_pointer<T>::value,
+                      "Do not pass a pointer to typed post(); pass the value by reference or use post(topic, ptr, size)");
+        return post(topic, &value, sizeof(T));
+    }
+
+    template <typename T>
+    bool tryPost(uint16_t topicId, const T& value) {
+        static_assert(std::is_trivially_copyable<T>::value,
+                      "T must be trivially copyable");
+        static_assert(!std::is_pointer<T>::value,
+                      "Do not pass a pointer to typed tryPost(); pass the value by reference or use tryPost(topicId, ptr, size)");
+        return tryPost(topicId, &value, sizeof(T));
+    }
+
+    template <typename T>
+    bool tryPost(const std::string& topic, const T& value) {
+        static_assert(std::is_trivially_copyable<T>::value,
+                      "T must be trivially copyable");
+        static_assert(!std::is_pointer<T>::value,
+                      "Do not pass a pointer to typed tryPost(); pass the value by reference or use tryPost(topic, ptr, size)");
+        return tryPost(topic, &value, sizeof(T));
+    }
+
+    bool post(uint16_t topicId) {
+        return post(topicId, nullptr, 0);
+    }
+
+    bool tryPost(uint16_t topicId) {
+        return tryPost(topicId, nullptr, 0);
     }
 
     uint64_t pending() const {

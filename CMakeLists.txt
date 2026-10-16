@@ -5,6 +5,7 @@ project (message-center)
 # Build options
 option(BUILD_TESTS "Build unit tests" ON)
 option(BENCHMARK "Execute benchmarks" ON)
+option(BUILD_EXAMPLES "Build examples" OFF)
 
 # Default to Release mode
 if (NOT CMAKE_BUILD_TYPE)
@@ -38,3 +39,8 @@ endif (BUILD_TESTS)
 if (BENCHMARK)
     add_subdirectory(benchmarks)
 endif (BENCHMARK)
+
+# Examples
+if (BUILD_EXAMPLES)
+    add_subdirectory(examples)
+endif (BUILD_EXAMPLES)

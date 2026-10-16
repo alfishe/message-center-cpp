@@ -4,11 +4,20 @@ Ready-to-build examples demonstrating each queue variant.
 
 ## Building All Examples
 
+From the repository root:
+
+```bash
+cmake -B build -DBUILD_EXAMPLES=ON
+cmake --build build --parallel
+```
+
+Or standalone from the `examples/` directory:
+
 ```bash
 cd examples
 mkdir build && cd build
 cmake ..
-make
+cmake --build . --parallel
 ```
 
 ## Individual Examples

@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <cstring>
 #include <thread>
+#include <type_traits>
 
 constexpr size_t EMU_MAX_TOPICS = 256;
 constexpr size_t EMU_INLINE_MAX = 48;
@@ -215,15 +216,37 @@ public:
 
   // Convenience for POD types on fast queue
   template <typename T>
-  bool postFastValue(uint16_t topicId, const T &value) {
+  bool postFast(uint16_t topicId, const T &value) {
     static_assert(sizeof(T) <= EMU_INLINE_MAX, "Type too large for fast queue");
-    static_assert(std::is_trivially_copyable<T>::value, "T must be POD");
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "T must be trivially copyable");
+    static_assert(!std::is_pointer<T>::value,
+                  "Do not pass a pointer to typed postFast(); pass the value by reference or use postFast(topicId, ptr, size)");
     return postFast(topicId, &value, sizeof(T));
+  }
+
+  template <typename T>
+  bool tryPostFast(uint16_t topicId, const T &value) {
+    static_assert(sizeof(T) <= EMU_INLINE_MAX, "Type too large for fast queue");
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "T must be trivially copyable");
+    static_assert(!std::is_pointer<T>::value,
+                  "Do not pass a pointer to typed tryPostFast(); pass the value by reference or use tryPostFast(topicId, ptr, size)");
+    return tryPostFast(topicId, &value, sizeof(T));
+  }
+
+  template <typename T>
+  bool postFastValue(uint16_t topicId, const T &value) {
+    return postFast(topicId, value);
   }
 
   // Signal-only post (no payload)
   bool postFast(uint16_t topicId) {
     return postFast(topicId, nullptr, 0);
+  }
+
+  bool tryPostFast(uint16_t topicId) {
+    return tryPostFast(topicId, nullptr, 0);
   }
 
   // Bulk post - for larger payloads, auto-selects inline vs managed
@@ -334,6 +357,58 @@ public:
       return postFast(topicId, data, size);
     }
     return postBulk(topicId, data, size);
+  }
+
+  template <typename T>
+  bool postBulk(uint16_t topicId, const T &value) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "T must be trivially copyable");
+    static_assert(!std::is_pointer<T>::value,
+                  "Do not pass a pointer to typed postBulk(); pass the value by reference or use postBulk(topicId, ptr, size)");
+    return postBulk(topicId, &value, sizeof(T));
+  }
+
+  template <typename T>
+  bool tryPostBulk(uint16_t topicId, const T &value) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "T must be trivially copyable");
+    static_assert(!std::is_pointer<T>::value,
+                  "Do not pass a pointer to typed tryPostBulk(); pass the value by reference or use tryPostBulk(topicId, ptr, size)");
+    return tryPostBulk(topicId, &value, sizeof(T));
+  }
+
+  template <typename T>
+  bool post(uint16_t topicId, const T &value) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "T must be trivially copyable");
+    static_assert(!std::is_pointer<T>::value,
+                  "Do not pass a pointer to typed post(); pass the value by reference or use post(topicId, ptr, size)");
+    return post(topicId, &value, sizeof(T));
+  }
+
+  template <typename T>
+  bool tryPost(uint16_t topicId, const T &value) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "T must be trivially copyable");
+    static_assert(!std::is_pointer<T>::value,
+                  "Do not pass a pointer to typed tryPost(); pass the value by reference or use tryPost(topicId, ptr, size)");
+    return tryPost(topicId, &value, sizeof(T));
+  }
+
+  bool postBulk(uint16_t topicId) {
+    return postBulk(topicId, nullptr, 0);
+  }
+
+  bool tryPostBulk(uint16_t topicId) {
+    return tryPostBulk(topicId, nullptr, 0);
+  }
+
+  bool post(uint16_t topicId) {
+    return post(topicId, nullptr, 0);
+  }
+
+  bool tryPost(uint16_t topicId) {
+    return tryPost(topicId, nullptr, 0);
   }
 
   // Dispatch one fast message (returns true if dispatched)

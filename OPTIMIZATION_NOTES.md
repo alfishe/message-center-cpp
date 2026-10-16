@@ -1,76 +1,32 @@
-# EventQueue Optimization - Master Branch Integration
+# EventQueue & Lock-Free Architecture Optimization Notes
 
 ## Summary
 
-This commit integrates the optimized EventQueue implementation into master, providing:
-- **6.3x performance improvement** (1.47 M/s → 9.27 M/s)
-- **Thread-safe observer management** (Copy-On-Write)
-- **Safe observer lifecycle** (dispatch tracking prevents crashes)
-- **Zero external dependencies** (uses only standard library + ObjectPool)
+This document summarizes the memory safety, concurrency, footprint, and cross-compiler optimizations integrated across all queue variants in `src/`:
 
-## Changes
-
-### Added Files
-- `src/objectpool.h` - Thread-safe object pool for Message allocation
-
-### Modified Files  
-- `src/eventqueue.h` - Added COW observer storage and dispatch tracking
-- `src/eventqueue.cpp` - Integrated optimized implementation
-
-## Implementation Details
-
-### 1. Object Pooling (2x improvement)
-- Messages are recycled instead of heap-allocated
-- Eliminates allocation overhead in hot path
-
-### 2. Copy-On-Write Observers (lock-free dispatch)
-- Observer lists stored as `shared_ptr<vector>`
-- Readers get immutable snapshots (no lock during dispatch)
-- Writers create new copies and atomically swap
-
-### 3. Dispatch Tracking (prevents crashes)
-- Tracks active dispatches with atomic counter
-- `RemoveObserver` blocks until all callbacks complete
-- Eliminates dangling callback crashes
-
-## Performance
-
-**Before** (Original):
-- Single-thread: 1.47 M/s
-- Multi-thread: ~0.5 M/s
-- Safety: ❌ Race conditions
-
-**After** (Optimized):
-- Single-thread: **9.27 M/s** (+531%)
-- Multi-thread: **2.10 M/s** (+320%)
-- Safety: ✅ Fully thread-safe
-
-## API Compatibility
-
-**100% backward compatible** - no API changes required!
-
-```cpp
-// Existing code works unchanged:
-EventQueue queue;
-queue.RegisterTopic("my_topic");
-queue.AddObserver("my_topic", callback);
-queue.Post("my_topic", payload);
-queue.RemoveObserver("my_topic", callback);  // Now blocks until safe!
-```
-
-## Testing
-
-Validated with comprehensive benchmark suite (see `optimization-experiments` branch):
-- 0 crashes in stress testing
-- 140x performance headroom vs requirements
-- Safe concurrent observer add/remove/dispatch
-
-## Migration Notes
-
-- `RemoveObserver` now blocks until in-flight dispatches complete (safety feature)
-- This is intentional and prevents dangling callback crashes
-- Overhead is minimal (2%) and only during unregister
+- **Stack footprint reduced by >99.9%**: `sizeof` for `MessageCenterFast`, `EventQueueBroadcastFast`, `EventQueueBroadcastFastBatch`, `EventQueueBroadcast`, and `EventQueueEmulator` dropped from `1.3–5.1 MB` to **`0.30–0.75 KB` (`< 1 KB`)**.
+- **Normal-work ring memory reduced by 98.4%**: `MPMCQueue<T, 65536>` starts with a single **1,024-slot (`64 KB`) segment** and lazily allocates/recycles additional segments only when queue depth exceeds 1,024 messages.
+- **ABA-safe, coordinated `ObjectPoolLockFree`**: 64-bit tagged index head (`32-bit generation tag + 32-bit slot index`), lazy 64-slot slab growth, and capacity coordinated with `QueueCapacity`.
+- **Cross-compiler throughput parity (`60–70M msg/s`)**: Hot/cold inlining annotations (`MC_FORCE_INLINE` / `MC_NOINLINE`) and single-observer struct assignment (`if (MC_LIKELY(count == 1))`) bring GCC 15, GCC 16, and Clang 21 to parity.
+- **Anti-DoS for mixed payload sizes**: `EventQueueEmulator::post()` / `tryPost()` automatically falls back to the bulk queue when a critical topic posts a payload `> 48 B`, and `dispatchPriority(64)` bounds contiguous fast-lane drains so bulk messages are never starved.
 
 ---
 
-For full analysis and alternative implementations, see the `optimization-experiments` branch.
+## Modified & Added Components
+
+### Core Headers (`src/`)
+- `src/platform.h` — Cross-compiler `MC_FORCE_INLINE`, `MC_NOINLINE`, `MC_LIKELY`, `MC_UNLIKELY`, and `MC_CACHE_LINE` definitions.
+- `src/mpmc_queue.h` — Segmented Vyukov MPMC ring buffer with 64-byte aligned `Segment::create()` / `Segment::destroy()`.
+- `src/objectpool_lockfree.h` — Tagged-index lock-free slab pool with lazy 64-slot chunks and overflow reclamation.
+- `src/payload_refcounted.h` — 16-byte aligned (`alignof(std::max_align_t)`) reference-counted payload with single-decrement message ownership.
+- `src/eventqueue_fast.h`, `src/eventqueue_batch.h`, `src/eventqueue_emulator.h`, `src/eventqueue_broadcast.h`, `src/messagecenter_fast.h` — Lazy topic chunk tables, lock-free immutable observer snapshots, non-blocking `tryPost`, and compile-time checked `post<T>(topic, const T&)` / `tryPost<T>(topic, const T&)` helpers.
+- `src/eventqueue.h`, `src/eventqueue.cpp`, `src/messagecenter.h`, `src/messagecenter.cpp` — Copy-on-write observer snapshots, active cancellation flags (`std::shared_ptr<std::atomic<bool>>`), `PostBatch`, `SetMaxQueueSize`, and deferred self-`Stop()` from observer callbacks.
+
+---
+
+## Verification Summary
+
+- **74/74 GoogleTest unit & regression tests** pass across **GCC 15.2**, **GCC 16.1**, and **Clang 21.1** under `-std=c++14`, `-std=c++17`, and `-std=c++20` with `-Wall -Wextra -Wpedantic -Werror`.
+- **0 errors / 0 leaks** under **AddressSanitizer + UndefinedBehaviorSanitizer + LeakSanitizer**, **ThreadSanitizer**, **Valgrind Memcheck**, and **LLVM libFuzzer**.
+
+See [doc/TESTING_AND_BENCHMARKS.md](doc/TESTING_AND_BENCHMARKS.md) for full details and benchmark tables.

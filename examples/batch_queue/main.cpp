@@ -15,6 +15,7 @@ struct Event { uint32_t id; uint64_t timestamp; };
 std::atomic<int> eventCount{0};
 
 void onEvent(uint16_t topicId, const void* data, size_t size, void* userData) {
+    (void)topicId; (void)data; (void)size; (void)userData;
     eventCount++;
 }
 
@@ -29,7 +30,7 @@ int main() {
     printf("Posting 10000 events...\n");
     for (int i = 0; i < 10000; i++) {
         Event e = {static_cast<uint32_t>(i), 0};
-        queue.post(topic, &e, sizeof(e));
+        queue.post(topic, e);
     }
 
     // Batch dispatch: process 32 at a time

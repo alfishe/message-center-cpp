@@ -16,6 +16,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -245,16 +246,60 @@ public:
     return (id != UINT16_MAX) ? post(id, data, size) : false;
   }
 
-  // Convenience for POD types
+  bool tryPost(const std::string &topic, const void *data, size_t size) {
+    uint16_t id = resolveTopic(topic);
+    return (id != UINT16_MAX) ? tryPost(id, data, size) : false;
+  }
+
+  // Convenience for POD / trivially copyable types
+  template <typename T>
+  bool post(uint16_t topicId, const T &value) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "T must be trivially copyable");
+    static_assert(!std::is_pointer<T>::value,
+                  "Do not pass a pointer to typed post(); pass the value by reference or use post(topicId, ptr, size)");
+    return post(topicId, &value, sizeof(T));
+  }
+
+  template <typename T>
+  bool tryPost(uint16_t topicId, const T &value) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "T must be trivially copyable");
+    static_assert(!std::is_pointer<T>::value,
+                  "Do not pass a pointer to typed tryPost(); pass the value by reference or use tryPost(topicId, ptr, size)");
+    return tryPost(topicId, &value, sizeof(T));
+  }
+
+  template <typename T>
+  bool post(const std::string &topic, const T &value) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "T must be trivially copyable");
+    static_assert(!std::is_pointer<T>::value,
+                  "Do not pass a pointer to typed post(); pass the value by reference or use post(topic, ptr, size)");
+    return post(topic, &value, sizeof(T));
+  }
+
+  template <typename T>
+  bool tryPost(const std::string &topic, const T &value) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "T must be trivially copyable");
+    static_assert(!std::is_pointer<T>::value,
+                  "Do not pass a pointer to typed tryPost(); pass the value by reference or use tryPost(topic, ptr, size)");
+    return tryPost(topic, &value, sizeof(T));
+  }
+
   template <typename T>
   bool postValue(uint16_t topicId, const T &value) {
-    static_assert(std::is_trivially_copyable<T>::value, "T must be trivially copyable");
-    return post(topicId, &value, sizeof(T));
+    return post(topicId, value);
   }
 
   // Post without payload (signal/event only)
   bool post(uint16_t topicId) {
     return post(topicId, nullptr, 0);
+  }
+
+  bool tryPost(uint16_t topicId) {
+    return tryPost(topicId, nullptr, 0);
   }
 
   // === POINTER + METADATA MODE ===

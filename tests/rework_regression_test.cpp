@@ -588,3 +588,126 @@ TEST(ReworkRegression, RestartAfterCallbackSelfStop_WorksCleanly) {
         MessageCenterCUT::DisposeDefaultMessageCenter();
     }
 }
+
+namespace {
+struct SmallTypedEvent {
+    uint32_t id;
+    uint64_t timestamp;
+};
+
+struct LargeTypedEvent {
+    uint64_t seq;
+    uint8_t payload[128];
+};
+
+void recordSmallAndLargeCb(uint16_t, const void* data, size_t size, void* user) {
+    uint64_t* acc = static_cast<uint64_t*>(user);
+    if (size == sizeof(SmallTypedEvent)) {
+        const SmallTypedEvent* e = static_cast<const SmallTypedEvent*>(data);
+        *acc += e->id + e->timestamp;
+    } else if (size == sizeof(LargeTypedEvent)) {
+        const LargeTypedEvent* e = static_cast<const LargeTypedEvent*>(data);
+        *acc += e->seq + e->payload[0] + e->payload[127];
+    } else if (size == 0) {
+        *acc += 1;
+    }
+}
+} // namespace
+
+TEST(ReworkRegression, TypedPayloadHelpersAndNonBlockingTryPost) {
+    SmallTypedEvent smallEvt{10, 20};
+    LargeTypedEvent largeEvt{};
+    largeEvt.seq = 100;
+    largeEvt.payload[0] = 5;
+    largeEvt.payload[127] = 7;
+
+    // 1. EventQueueBroadcastFast
+    {
+        EventQueueBroadcastFast<64> q;
+        uint16_t t = q.registerTopic();
+        uint64_t sum = 0;
+        q.addObserver(t, &recordSmallAndLargeCb, &sum);
+
+        EXPECT_TRUE(q.post(t, smallEvt));
+        EXPECT_TRUE(q.tryPost(t, largeEvt));
+        EXPECT_TRUE(q.tryPost(t));
+        EXPECT_EQ(q.dispatchAll(), 3u);
+        EXPECT_EQ(sum, 30u + 112u + 1u);
+    }
+
+    // 2. EventQueueBroadcastFastBatch
+    {
+        EventQueueBroadcastFastBatch<64> q;
+        uint16_t t = q.registerTopic();
+        uint64_t sum = 0;
+        q.addObserver(t, &recordSmallAndLargeCb, &sum);
+
+        EXPECT_TRUE(q.post(t, smallEvt));
+        EXPECT_TRUE(q.tryPost(t, largeEvt));
+        EXPECT_TRUE(q.postBatched(t, smallEvt));
+        EXPECT_TRUE(q.postBatched(t));
+        q.flushBatch();
+        EXPECT_EQ(q.dispatchAll(), 4u);
+        EXPECT_EQ(sum, 30u + 112u + 30u + 1u);
+    }
+
+    // 3. EventQueueEmulator
+    {
+        EventQueueEmulator<64, 64> q;
+        uint16_t crit = q.registerTopic(TopicPriority::Critical);
+        uint16_t norm = q.registerTopic(TopicPriority::Normal);
+        uint64_t sum = 0;
+        q.addObserver(crit, &recordSmallAndLargeCb, &sum);
+        q.addObserver(norm, &recordSmallAndLargeCb, &sum);
+
+        EXPECT_TRUE(q.postFast(crit, smallEvt));
+        EXPECT_TRUE(q.tryPostFast(crit, smallEvt));
+        EXPECT_TRUE(q.tryPostFast(crit));
+        EXPECT_TRUE(q.post(crit, largeEvt));    // Auto-routes >48B to bulk queue
+        EXPECT_TRUE(q.tryPost(crit, largeEvt)); // Auto-routes >48B to bulk queue
+        EXPECT_TRUE(q.postBulk(norm, largeEvt));
+        EXPECT_TRUE(q.tryPostBulk(norm, smallEvt));
+        EXPECT_EQ(q.dispatchAll(), 7u);
+        EXPECT_EQ(sum, 30u + 30u + 1u + 112u + 112u + 112u + 30u);
+    }
+
+    // 4. EventQueueBroadcast
+    {
+        EventQueueBroadcast<64> q;
+        uint16_t t = q.registerTopic("typed.bcast");
+        uint64_t sum = 0;
+        q.addObserver(t, [&](uint16_t, const void* data, size_t size) {
+            recordSmallAndLargeCb(t, data, size, &sum);
+        });
+
+        EXPECT_TRUE(q.post(t, smallEvt));
+        EXPECT_TRUE(q.tryPost(t, largeEvt));
+        EXPECT_TRUE(q.post(std::string("typed.bcast"), smallEvt));
+        EXPECT_TRUE(q.tryPost(std::string("typed.bcast"), largeEvt));
+        EXPECT_TRUE(q.tryPost(t));
+        EXPECT_EQ(q.dispatchAll(), 5u);
+        EXPECT_EQ(sum, 30u + 112u + 30u + 112u + 1u);
+    }
+
+    // 5. MessageCenterFast
+    {
+        MessageCenterFast mc;
+        mc.start();
+        uint16_t t = mc.registerTopic("typed.mcfast");
+        std::atomic<uint64_t> sum{0};
+        mc.addObserver(t, [&](uint16_t tid, const void* data, size_t size) {
+            uint64_t local = 0;
+            recordSmallAndLargeCb(tid, data, size, &local);
+            sum.fetch_add(local, std::memory_order_relaxed);
+        });
+
+        EXPECT_TRUE(mc.post(t, smallEvt));
+        EXPECT_TRUE(mc.tryPost(t, largeEvt));
+        EXPECT_TRUE(mc.post(std::string("typed.mcfast"), smallEvt));
+        EXPECT_TRUE(mc.tryPost(std::string("typed.mcfast"), largeEvt));
+        EXPECT_TRUE(mc.tryPost(t));
+        mc.flush(1000);
+        mc.stop();
+        EXPECT_EQ(sum.load(), 30u + 112u + 30u + 112u + 1u);
+    }
+}

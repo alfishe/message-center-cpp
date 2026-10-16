@@ -12,18 +12,19 @@ Most in-process queues force a tradeoff: either simple API with mutex overhead, 
 
 For latency-sensitive workloads like emulators or games, the dual-queue `EventQueueEmulator` variant separates critical events (audio sync, input, vblank) from bulk data (debug traces, state saves), ensuring time-critical callbacks never wait behind large payloads — achieving **P99 under 100μs** even at 10,000+ fps in turbo mode.
 
-See [Choosing a Queue](doc/CHOOSING_A_QUEUE.md) for variant comparison, [Performance Analysis](doc/PERFORMANCE_ANALYSIS.md) for benchmarks, and [examples/](examples/) for ready-to-build code.
+See [Choosing a Queue](doc/CHOOSING_A_QUEUE.md) for variant comparison, [Performance Analysis](doc/PERFORMANCE_ANALYSIS.md) and [Testing & Benchmarks](doc/TESTING_AND_BENCHMARKS.md) for comprehensive measurements, and [examples/](examples/) for ready-to-build code.
 
 ## Benchmark Results
 
-**Test configuration**: Apple Silicon (ARM64), 10 cores, 2 producers + 8 consumers, 32B payloads
+**Test configuration**: Apple Silicon (ARM64, 2P+8C multi-threaded) and x86_64 Linux (GCC 15.2 / GCC 16.1 / Clang 21.1, single-thread & burst):
 
-| Queue Variant | P50 | P99 | P999 | Throughput | Best For |
-|---------------|-----|-----|------|------------|----------|
-| EventQueueFast | **1.2 μs** | 108 μs | 144 μs | **5.75 M/s** | General-purpose |
-| EventQueueBatch | 1.2 μs | 17 μs | **76 μs** | 5.44 M/s | Low tail latency |
-| EventQueueEmulator | 0.17 μs | **99 μs** | 130 μs | 128 M/s | Emulator/games |
-| Original (mutex) | 6,617 μs | 9,873 μs | — | 372 K/s | Baseline |
+| Queue Variant | Single-Thread / Frame Burst | Multi-Threaded (2P+8C) P50 | Multi-Threaded P999 | Stack Footprint | Best For |
+|---------------|-----------------------------|----------------------------|---------------------|-----------------|----------|
+| `EventQueueBroadcastFast` | **60.7–67.8 M/s** (~15 ns) | **1.2 μs** (5.75 M/s) | 144 μs | **0.30 KB** (64 KB initial heap) | General-purpose lock-free |
+| `EventQueueBroadcastFastBatch` | **39.2–42.2 M/s** (~24 ns) | 1.2 μs (5.44 M/s) | **76 μs** | **0.30 KB** (64 KB initial heap) | Low tail latency |
+| `EventQueueEmulator` | **61.7–69.5 M/s** (~15 ns) | **0.17 μs** (128 M/s) | 130 μs | **0.56 KB** (128 KB initial heap) | Emulators / games |
+| `MessageCenterFast` | **24.6 M/s** (~40 ns) | **1.11 μs** | — | **0.75 KB** (64 KB initial heap) | Async worker + lock-free |
+| `MessageCenter` (mutex) | **4.3–5.5 M/s** (`PostBatch`) | ~12–15 μs | — | **0.65 KB** | High-level app / UI events |
 
 ### Comparison to Alternatives
 
@@ -39,9 +40,10 @@ See [Choosing a Queue](doc/CHOOSING_A_QUEUE.md) for variant comparison, [Perform
 **Key advantages over alternatives:**
 - **Automatic memory management**: Fire-and-forget API — post and move on, no cleanup needed
 - **Built-in observer pattern**: Topic-based pub/sub with automatic fan-out
-- **Adaptive payload handling**: Inline for small data (≤48B), ref-counted for large
-- **Dual-queue support**: Separate latency-critical events from bulk data
-- **No external dependencies**: Header-only, C++11 compatible
+- **Adaptive payload handling**: Inline for small data (≤48B), ref-counted for large (>48B), plus compile-time checked `post(topic, value)` and non-blocking `tryPost(topic, value)` overloads
+- **Segmented demand-paged ring buffers & lazy pools**: `< 1 KB` stack frames and `64 KB` initial ring memory during normal work, scaling automatically up to full capacity on backlog spikes
+- **Dual-queue support**: Separate latency-critical events from bulk data in `EventQueueEmulator`, with automatic bulk fallback for oversized critical payloads (>48B)
+- **No external dependencies**: Core lock-free queues are header-only and C++11/14/17/20 compatible
 
 ## Quick Start
 
@@ -90,7 +92,9 @@ int main() {
 | `eventqueue_fast.h` | `EventQueueBroadcastFast<N>` | General-purpose, highest throughput |
 | `eventqueue_batch.h` | `EventQueueBroadcastFastBatch<N>` | Low tail latency (P999) |
 | `eventqueue_emulator.h` | `EventQueueEmulator<N,M>` | Dual-queue for games/emulators |
-| `eventqueue_broadcast.h` | `EventQueueBroadcast<N>` | Flexible API with std::function |
+| `eventqueue_broadcast.h` | `EventQueueBroadcast<N>` | Flexible API with `std::function` |
+| `messagecenter_fast.h` | `MessageCenterFast` | Lock-free queue with background worker thread |
+| `messagecenter.h` | `MessageCenter` / `EventQueue` | Classic mutex + background thread with string topics |
 
 **Observer types supported:**
 - Static functions
@@ -134,4 +138,4 @@ Subdirectories `/src`, `/tests`, `/benchmarks`, `/examples` can be built indepen
 | [emulator_queue](examples/emulator_queue/) | Dual-queue system separating critical and bulk events |
 | [turbo_benchmark](examples/turbo_benchmark/) | Stress test for high-fps scenarios (10k+ fps turbo mode) |
 
-Build examples: `cd examples && mkdir build && cd build && cmake .. && cmake --build .`
+Build examples: `cmake -B build -DBUILD_EXAMPLES=ON && cmake --build build --parallel` (or standalone: `cd examples && mkdir build && cd build && cmake .. && cmake --build .`)

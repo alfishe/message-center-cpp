@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstring>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 constexpr size_t BATCH_MAX_TOPICS = 4096;
@@ -362,13 +363,47 @@ public:
   }
 
   template <typename T>
-  bool postValue(uint16_t topicId, const T &value) {
-    static_assert(std::is_trivially_copyable<T>::value, "T must be POD");
+  bool post(uint16_t topicId, const T &value) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "T must be trivially copyable");
+    static_assert(!std::is_pointer<T>::value,
+                  "Do not pass a pointer to typed post(); pass the value by reference or use post(topicId, ptr, size)");
     return post(topicId, &value, sizeof(T));
+  }
+
+  template <typename T>
+  bool tryPost(uint16_t topicId, const T &value) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "T must be trivially copyable");
+    static_assert(!std::is_pointer<T>::value,
+                  "Do not pass a pointer to typed tryPost(); pass the value by reference or use tryPost(topicId, ptr, size)");
+    return tryPost(topicId, &value, sizeof(T));
+  }
+
+  template <typename T>
+  bool postBatched(uint16_t topicId, const T &value) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "T must be trivially copyable");
+    static_assert(!std::is_pointer<T>::value,
+                  "Do not pass a pointer to typed postBatched(); pass the value by reference or use postBatched(topicId, ptr, size)");
+    return postBatched(topicId, &value, sizeof(T));
+  }
+
+  template <typename T>
+  bool postValue(uint16_t topicId, const T &value) {
+    return post(topicId, value);
   }
 
   bool post(uint16_t topicId) {
     return post(topicId, nullptr, 0);
+  }
+
+  bool tryPost(uint16_t topicId) {
+    return tryPost(topicId, nullptr, 0);
+  }
+
+  bool postBatched(uint16_t topicId) {
+    return postBatched(topicId, nullptr, 0);
   }
 
   bool dispatchOne() {

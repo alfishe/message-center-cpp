@@ -14,15 +14,18 @@
 struct Position { float x, y, z; };
 
 void onMove(uint16_t topicId, const void* data, size_t size, void* userData) {
+    (void)topicId; (void)size; (void)userData;
     const Position* p = static_cast<const Position*>(data);
     printf("[Move] (%.1f, %.1f, %.1f)\n", p->x, p->y, p->z);
 }
 
 void onHealth(uint16_t topicId, const void* data, size_t size, void* userData) {
+    (void)topicId; (void)size; (void)userData;
     printf("[Health] %d HP\n", *static_cast<const int*>(data));
 }
 
 void onChat(uint16_t topicId, const void* data, size_t size, void* userData) {
+    (void)topicId; (void)userData;
     printf("[Chat] %.*s\n", static_cast<int>(size), static_cast<const char*>(data));
 }
 
@@ -39,12 +42,12 @@ int main() {
     queue.addObserver(healthTopic, onHealth, nullptr);
     queue.addObserver(chatTopic, onChat, nullptr);
 
-    // Post events
+    // Post events (typed overload for structs/scalars, or pointer + size for buffers)
     Position pos = {10.0f, 20.0f, 5.0f};
-    queue.post(moveTopic, &pos, sizeof(pos));
+    queue.post(moveTopic, pos);
 
     int health = 85;
-    queue.post(healthTopic, &health, sizeof(health));
+    queue.post(healthTopic, health);
 
     const char* msg = "Hello!";
     queue.post(chatTopic, msg, strlen(msg));
@@ -60,7 +63,7 @@ int main() {
     std::thread producer([&]() {
         for (int i = 0; i < 100; i++) {
             Position p = {static_cast<float>(i), 0.0f, 0.0f};
-            queue.post(moveTopic, &p, sizeof(p));
+            queue.post(moveTopic, p);
             count++;
         }
     });

@@ -6,11 +6,12 @@ This guide helps you select the appropriate queue variant for your use case.
 
 | Variant | Architecture | Best For |
 |---------|--------------|----------|
-| `MessageCenter` | Mutex + background thread | General apps, simplest API |
-| `EventQueueBroadcastFast` | Lock-free MPMC | High throughput, low latency |
+| `MessageCenter` / `EventQueue` | Mutex + background thread | General apps, simplest API, `PostBatch`, bounded `SetMaxQueueSize` |
+| `MessageCenterFast` | Lock-free MPMC + background thread | Async fire-and-forget with sub-2μs latency |
+| `EventQueueBroadcastFast` | Lock-free MPMC | Highest throughput (`60–68M msg/s` single-thread, `5.75M/s` 2P+8C) |
 | `EventQueueBroadcastFastBatch` | Lock-free + batching | Lowest tail latency (P999) |
-| `EventQueueEmulator` | Dual lock-free queues | Games, emulators, mixed workloads |
-| `EventQueueBroadcast` | Lock-free + std::function | Flexible callbacks, lambdas |
+| `EventQueueEmulator` | Dual lock-free queues | Games, emulators, mixed critical/bulk workloads |
+| `EventQueueBroadcast` | Lock-free + `std::function` | Flexible callbacks, capturing lambdas |
 
 ## Performance Comparison
 
@@ -104,8 +105,10 @@ mc.Post("player.moved", new PlayerEvent(...));
 EventQueueBroadcastFast<4096> queue;
 uint16_t topic = queue.registerTopic();
 queue.addObserver(topic, callback, userData);
-queue.post(topic, &data, sizeof(data));
-queue.dispatchAll();  // Must call manually
+queue.post(topic, data);                   // Typed overload (compile-time checked)
+queue.tryPost(topic, data);                // Non-blocking (returns false if full)
+queue.post(topic, &data, sizeof(data));    // Raw pointer + size overload
+queue.dispatchAll();                       // Must call manually
 ```
 
 ### Use EventQueueBroadcastFastBatch when:
@@ -136,10 +139,12 @@ EventQueueEmulator<4096, 16384> queue;  // Critical, Bulk capacities
 uint16_t vblank = queue.registerTopic(TopicPriority::Critical);
 uint16_t trace = queue.registerTopic(TopicPriority::Normal);
 
-queue.postFast(vblank, &frameNum, 4);   // Goes to critical queue
-queue.postBulk(trace, traceData, 1024); // Goes to bulk queue
+queue.postFast(vblank, frameNum);       // Typed inline fast post (≤48B)
+queue.post(vblank, bigStateSnapshot);   // Auto-routes >48B to bulk queue (never dropped)
+queue.postBulk(trace, traceData, 1024); // Explicit bulk queue post
 
-queue.dispatchAll();  // Drains critical first, then bulk
+queue.dispatchPriority();               // Drains up to 64 critical, then 1 bulk
+queue.dispatchAll();                    // Drains all critical, then all bulk
 ```
 
 ### Use EventQueueBroadcast when:
@@ -178,13 +183,14 @@ mc.AddObserver("ui.update", ...);
 
 ## Memory Characteristics
 
-| Variant | Allocation Pattern | Payload Handling |
-|---------|-------------------|------------------|
-| MessageCenter | Heap per message | `MessagePayload*` derived class |
-| EventQueueFast | Pool + inline | ≤48B inline, >48B ref-counted |
-| EventQueueBatch | Pool + inline | ≤48B inline, >48B ref-counted |
-| EventQueueEmulator | Pool + inline | Critical: inline only, Bulk: ref-counted OK |
-| EventQueueBroadcast | Pool + inline | ≤48B inline, >48B ref-counted |
+| Variant | Stack `sizeof` | Allocation Pattern | Payload Handling |
+|---------|----------------|-------------------|------------------|
+| `MessageCenter` | 0.65 KB | Heap per message | `MessagePayload*` derived class |
+| `MessageCenterFast` | 0.75 KB | Demand-paged 64KB ring segments + lazy pool | ≤64B inline, >64B heap-managed |
+| `EventQueueBroadcastFast` | 0.30 KB | Demand-paged 64KB ring segments + lazy pool | ≤48B inline, >48B ref-counted |
+| `EventQueueBroadcastFastBatch` | 0.30 KB | Demand-paged 64KB ring segments + lazy pool | ≤48B inline, >48B ref-counted |
+| `EventQueueEmulator` | 0.56 KB | Demand-paged 64KB ring segments + lazy pool | Critical: ≤48B inline (`post()` falls back to bulk for >48B); Bulk: ≤48B inline / >48B ref-counted |
+| `EventQueueBroadcast` | 0.50 KB | Demand-paged 64KB ring segments + lazy pool | ≤48B inline, >48B ref-counted |
 
 ### Payload Size Recommendations
 

@@ -2,19 +2,22 @@
 // Tests queue limits for high-fps emulator scenarios
 
 #include "../../src/eventqueue_emulator.h"
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
-#include <algorithm>
+#include <string>
 #include <vector>
 
 std::atomic<int> criticalCount{0};
 std::atomic<int> bulkCount{0};
 
 void onCritical(uint16_t tid, const void* data, size_t size, void* userData) {
+    (void)tid; (void)data; (void)size; (void)userData;
     criticalCount++;
 }
 
 void onBulk(uint16_t tid, const void* data, size_t size, void* userData) {
+    (void)tid; (void)data; (void)size; (void)userData;
     bulkCount++;
 }
 

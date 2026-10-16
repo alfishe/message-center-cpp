@@ -14,14 +14,17 @@ std::atomic<int> audioCount{0};
 std::atomic<int> traceCount{0};
 
 void onVBlank(uint16_t tid, const void* data, size_t size, void* userData) {
+    (void)tid; (void)data; (void)size; (void)userData;
     vblankCount++;
 }
 
 void onAudio(uint16_t tid, const void* data, size_t size, void* userData) {
+    (void)tid; (void)data; (void)size; (void)userData;
     audioCount++;
 }
 
 void onTrace(uint16_t tid, const void* data, size_t size, void* userData) {
+    (void)tid; (void)data; (void)size; (void)userData;
     traceCount++;
 }
 

@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <cstring>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 constexpr size_t FAST_MAX_TOPICS = 4096;
@@ -232,9 +233,13 @@ public:
     msg->observerCount = count;
     msg->payloadSize = size;
 
-    std::memcpy(msg->observers, topic->observers, count * sizeof(FastObserver));
+    if (MC_LIKELY(count == 1)) {
+      msg->observers[0] = topic->observers[0];
+    } else {
+      std::memcpy(msg->observers, topic->observers, count * sizeof(FastObserver));
+    }
 
-    if (size <= FAST_INLINE_MAX) {
+    if (MC_LIKELY(size <= FAST_INLINE_MAX)) {
       msg->isInline = true;
       if (data && size > 0)
         std::memcpy(msg->inlineData, data, size);
@@ -253,13 +258,34 @@ public:
   }
 
   template <typename T>
-  bool postValue(uint16_t topicId, const T &value) {
-    static_assert(std::is_trivially_copyable<T>::value, "T must be POD");
+  bool post(uint16_t topicId, const T &value) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "T must be trivially copyable");
+    static_assert(!std::is_pointer<T>::value,
+                  "Do not pass a pointer to typed post(); pass the value by reference or use post(topicId, ptr, size)");
     return post(topicId, &value, sizeof(T));
+  }
+
+  template <typename T>
+  bool tryPost(uint16_t topicId, const T &value) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "T must be trivially copyable");
+    static_assert(!std::is_pointer<T>::value,
+                  "Do not pass a pointer to typed tryPost(); pass the value by reference or use tryPost(topicId, ptr, size)");
+    return tryPost(topicId, &value, sizeof(T));
+  }
+
+  template <typename T>
+  bool postValue(uint16_t topicId, const T &value) {
+    return post(topicId, value);
   }
 
   bool post(uint16_t topicId) {
     return post(topicId, nullptr, 0);
+  }
+
+  bool tryPost(uint16_t topicId) {
+    return tryPost(topicId, nullptr, 0);
   }
 
   // Hot path - minimal overhead dispatch
