@@ -17,6 +17,7 @@
 #include "eventqueue_fast.h"
 #include "messagecenter.h"
 #include "messagecenter_fast.h"
+#include "objectpool.h"
 #include "objectpool_lockfree.h"
 
 #include <atomic>
@@ -709,5 +710,83 @@ TEST(ReworkRegression, TypedPayloadHelpersAndNonBlockingTryPost) {
         mc.flush(1000);
         mc.stop();
         EXPECT_EQ(sum.load(), 30u + 112u + 30u + 112u + 1u);
+    }
+}
+
+TEST(ReworkRegression, GetTopicByIdZeroAndOutOfRangePostAndObjectPoolClear) {
+    // 1. EventQueue::GetTopicByID(0) returns first topic name and Post rejects >= MAX_TOPICS
+    {
+        EventQueue q;
+        int t0 = q.RegisterTopic("first.topic");
+        int t1 = q.RegisterTopic("second.topic");
+        ASSERT_EQ(t0, 0);
+        ASSERT_EQ(t1, 1);
+        EXPECT_EQ(q.GetTopicByID(0), "first.topic");
+        EXPECT_EQ(q.GetTopicByID(1), "second.topic");
+        EXPECT_EQ(q.GetTopicByID(2), "");
+        EXPECT_EQ(q.GetTopicByID(-1), "");
+
+        std::atomic<int> destroyed{0};
+        struct Tracked : public MessagePayload {
+            std::atomic<int>* d;
+            explicit Tracked(std::atomic<int>* ptr) : d(ptr) {}
+            ~Tracked() override { d->fetch_add(1, std::memory_order_relaxed); }
+        };
+
+        EXPECT_FALSE(q.Post(static_cast<int>(MAX_TOPICS), new Tracked(&destroyed), true));
+        EXPECT_EQ(destroyed.load(), 1);
+
+        MessagePayload* batch[2] = {new Tracked(&destroyed), new Tracked(&destroyed)};
+        EXPECT_EQ(q.PostBatch(static_cast<int>(MAX_TOPICS), batch, 2, true), 0u);
+        EXPECT_EQ(destroyed.load(), 3);
+    }
+
+    // 2. ObjectPool::clear() preserves allocated() count for checked-out objects
+    {
+        ObjectPool<int> pool(2, 2);
+        EXPECT_EQ(pool.size(), 2u);
+        EXPECT_EQ(pool.allocated(), 2u);
+
+        int* a = pool.acquire();
+        EXPECT_EQ(pool.size(), 1u);
+        EXPECT_EQ(pool.allocated(), 2u);
+
+        pool.clear();
+        EXPECT_EQ(pool.size(), 0u);
+        EXPECT_EQ(pool.allocated(), 1u); // 'a' is still checked out
+
+        int* b = pool.acquire();
+        int* c = pool.acquire();
+        EXPECT_EQ(pool.allocated(), 3u);
+
+        pool.release(b);
+        pool.release(c);
+        pool.release(a); // Pool is at maxSize (2), so 'a' is deleted without underflowing
+        EXPECT_EQ(pool.size(), 2u);
+        EXPECT_EQ(pool.allocated(), 2u);
+    }
+
+    // 3. MessageCenterFast nullptr payload zero-initialization (inline & managed)
+    {
+        MessageCenterFast mc;
+        mc.start();
+        uint16_t t = mc.registerTopic("null.zero");
+        std::atomic<int> verified{0};
+        mc.addObserver(t, [&](uint16_t, const void* data, size_t size) {
+            const uint8_t* bytes = static_cast<const uint8_t*>(data);
+            bool allZero = (bytes != nullptr);
+            for (size_t i = 0; i < size && allZero; ++i) {
+                if (bytes[i] != 0) allZero = false;
+            }
+            if (allZero) verified.fetch_add(1, std::memory_order_relaxed);
+        });
+
+        EXPECT_TRUE(mc.post(t, nullptr, 32));
+        EXPECT_TRUE(mc.post(t, nullptr, 128));
+        EXPECT_TRUE(mc.tryPost(t, nullptr, 32));
+        EXPECT_TRUE(mc.tryPost(t, nullptr, 128));
+        mc.flush(1000);
+        mc.stop();
+        EXPECT_EQ(verified.load(), 4);
     }
 }

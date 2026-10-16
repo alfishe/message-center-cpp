@@ -172,8 +172,10 @@ public:
     } else {
       std::memcpy(msg->observers, topic.observers, count * sizeof(EmuObserver));
     }
-    if (data && size > 0)
+    if (MC_LIKELY(data != nullptr && size > 0))
       std::memcpy(msg->data, data, size);
+    else if (MC_UNLIKELY(size > 0))
+      mc_detail::zeroMemoryCold(msg->data, size);
 
     while (!m_fastQueue.try_push(msg)) {
       std::this_thread::yield();
@@ -204,8 +206,10 @@ public:
     } else {
       std::memcpy(msg->observers, topic.observers, count * sizeof(EmuObserver));
     }
-    if (data && size > 0)
+    if (MC_LIKELY(data != nullptr && size > 0))
       std::memcpy(msg->data, data, size);
+    else if (MC_UNLIKELY(size > 0))
+      mc_detail::zeroMemoryCold(msg->data, size);
 
     if (!m_fastQueue.try_push(msg)) {
       m_fastPool.release(msg);
@@ -272,8 +276,10 @@ public:
 
     if (MC_LIKELY(size <= EMU_INLINE_MAX)) {
       msg->isInline = true;
-      if (data && size > 0)
+      if (MC_LIKELY(data != nullptr && size > 0))
         std::memcpy(msg->inlineData, data, size);
+      else if (MC_UNLIKELY(size > 0))
+        mc_detail::zeroMemoryCold(msg->inlineData, size);
     } else {
       msg->isInline = false;
       msg->managed = RefCountedPayload::create(data, size);
@@ -312,8 +318,10 @@ public:
 
     if (MC_LIKELY(size <= EMU_INLINE_MAX)) {
       msg->isInline = true;
-      if (data && size > 0)
+      if (MC_LIKELY(data != nullptr && size > 0))
         std::memcpy(msg->inlineData, data, size);
+      else if (MC_UNLIKELY(size > 0))
+        mc_detail::zeroMemoryCold(msg->inlineData, size);
     } else {
       msg->isInline = false;
       msg->managed = RefCountedPayload::create(data, size);
@@ -471,15 +479,68 @@ public:
 
   // Dispatch all with priority (fast first, then bulk)
   size_t dispatchAll() {
+    static constexpr size_t DRAIN_CHUNK = 32;
+    EmuFastMessage *fastBatch[DRAIN_CHUNK];
+    EmuBulkMessage *bulkBatch[DRAIN_CHUNK];
     size_t count = 0;
 
-    // Drain fast queue completely
-    while (dispatchFast())
-      ++count;
+    // Drain fast queue completely in batches
+    for (;;) {
+      size_t batchSize = 0;
+      while (batchSize < DRAIN_CHUNK) {
+        EmuFastMessage *msg = nullptr;
+        if (!m_fastQueue.try_pop(msg) || !msg)
+          break;
+        fastBatch[batchSize++] = msg;
+      }
+      if (batchSize == 0)
+        break;
+      for (size_t i = 0; i < batchSize; ++i) {
+        EmuFastMessage *msg = fastBatch[i];
+        for (uint8_t j = 0; j < msg->observerCount; ++j) {
+          msg->observers[j].callback(msg->topicId, msg->data, msg->payloadSize,
+                                      msg->observers[j].userData);
+        }
+      }
+      if (batchSize == 1)
+        m_fastPool.release(fastBatch[0]);
+      else
+        m_fastPool.releaseBatch(fastBatch, batchSize);
+      count += batchSize;
+    }
 
-    // Then drain bulk queue
-    while (dispatchBulk())
-      ++count;
+    // Then drain bulk queue in batches
+    if (m_bulkPending.load(std::memory_order_acquire) != 0) {
+      for (;;) {
+        size_t batchSize = 0;
+        while (batchSize < DRAIN_CHUNK) {
+          EmuBulkMessage *msg = nullptr;
+          if (!m_bulkQueue.try_pop(msg) || !msg)
+            break;
+          bulkBatch[batchSize++] = msg;
+        }
+        if (batchSize == 0)
+          break;
+        m_bulkPending.fetch_sub(batchSize, std::memory_order_relaxed);
+        for (size_t i = 0; i < batchSize; ++i) {
+          EmuBulkMessage *msg = bulkBatch[i];
+          const void *data =
+              msg->isInline ? msg->inlineData
+                            : (msg->managed ? msg->managed->data() : nullptr);
+          for (uint8_t j = 0; j < msg->observerCount; ++j) {
+            msg->observers[j].callback(msg->topicId, data, msg->payloadSize,
+                                        msg->observers[j].userData);
+          }
+          if (!msg->isInline && msg->managed)
+            msg->managed->release();
+        }
+        if (batchSize == 1)
+          m_bulkPool.release(bulkBatch[0]);
+        else
+          m_bulkPool.releaseBatch(bulkBatch, batchSize);
+        count += batchSize;
+      }
+    }
 
     return count;
   }

@@ -189,10 +189,12 @@ public:
     msg->payloadSize = size;
 
     if (size <= INLINE_PAYLOAD_MAX) {
-      // Small payload: copy inline
+      // Small payload: copy inline (or zero-init if data is nullptr)
       msg->isInline = true;
-      if (data && size > 0)
+      if (MC_LIKELY(data != nullptr && size > 0))
         std::memcpy(msg->inlineData, data, size);
+      else if (MC_UNLIKELY(size > 0))
+        mc_detail::zeroMemoryCold(msg->inlineData, size);
     } else {
       // Large payload: allocate managed (owned by message, refcount=1)
       msg->isInline = false;
@@ -225,8 +227,10 @@ public:
 
     if (size <= INLINE_PAYLOAD_MAX) {
       msg->isInline = true;
-      if (data && size > 0)
+      if (MC_LIKELY(data != nullptr && size > 0))
         std::memcpy(msg->inlineData, data, size);
+      else if (MC_UNLIKELY(size > 0))
+        mc_detail::zeroMemoryCold(msg->inlineData, size);
     } else {
       msg->isInline = false;
       msg->managed = RefCountedPayload::create(data, size);

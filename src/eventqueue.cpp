@@ -436,7 +436,7 @@ std::string EventQueue::GetTopicByID(int id)
     // The registry is mutated by RegisterTopic() from any thread - guard the access
     std::lock_guard<std::mutex> lock(m_mutexTopics);
 
-    if (id > 0 && static_cast<unsigned>(id) < MAX_TOPICS)
+    if (id >= 0 && id < m_topicMax && static_cast<unsigned>(id) < MAX_TOPICS)
     {
         result = m_topics[id];
     }
@@ -482,7 +482,7 @@ size_t EventQueue::GetQueueSize()
 
 bool EventQueue::Post(int id, MessagePayload* obj, bool autoCleanupPayload)
 {
-    if (id < 0)
+    if (id < 0 || static_cast<unsigned>(id) >= MAX_TOPICS)
     {
         if (autoCleanupPayload && obj != nullptr)
         {
@@ -540,7 +540,7 @@ size_t EventQueue::PostBatch(int id, MessagePayload* const* objs, size_t count, 
         return 0;
     }
 
-    if (id < 0)
+    if (id < 0 || static_cast<unsigned>(id) >= MAX_TOPICS)
     {
         if (autoCleanupPayload && objs != nullptr)
         {

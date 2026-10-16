@@ -198,8 +198,10 @@ public:
 
     if (MC_LIKELY(size <= FAST_INLINE_MAX)) {
       msg->isInline = true;
-      if (data && size > 0)
+      if (MC_LIKELY(data != nullptr && size > 0))
         std::memcpy(msg->inlineData, data, size);
+      else if (MC_UNLIKELY(size > 0))
+        mc_detail::zeroMemoryCold(msg->inlineData, size);
     } else {
       msg->isInline = false;
       msg->managed = RefCountedPayload::create(data, size);
@@ -241,8 +243,10 @@ public:
 
     if (MC_LIKELY(size <= FAST_INLINE_MAX)) {
       msg->isInline = true;
-      if (data && size > 0)
+      if (MC_LIKELY(data != nullptr && size > 0))
         std::memcpy(msg->inlineData, data, size);
+      else if (MC_UNLIKELY(size > 0))
+        mc_detail::zeroMemoryCold(msg->inlineData, size);
     } else {
       msg->isInline = false;
       msg->managed = RefCountedPayload::create(data, size);
@@ -312,16 +316,54 @@ public:
 
   // Batch dispatch - process multiple messages, better cache utilization
   size_t dispatchBatch(size_t maxCount) {
+    static constexpr size_t DRAIN_CHUNK = 32;
+    FastMessage *batch[DRAIN_CHUNK];
     size_t dispatched = 0;
-    while (dispatched < maxCount && dispatchOne())
-      ++dispatched;
+
+    while (dispatched < maxCount) {
+      size_t limit = std::min(maxCount - dispatched, DRAIN_CHUNK);
+      size_t batchSize = 0;
+      while (batchSize < limit) {
+        FastMessage *msg = nullptr;
+        if (!m_queue.try_pop(msg) || !msg)
+          break;
+        batch[batchSize++] = msg;
+      }
+      if (batchSize == 0)
+        break;
+
+      for (size_t i = 0; i < batchSize; ++i) {
+        FastMessage *msg = batch[i];
+        const void *data =
+            msg->isInline ? msg->inlineData
+                          : (msg->managed ? msg->managed->data() : nullptr);
+        for (uint8_t j = 0; j < msg->observerCount; ++j) {
+          msg->observers[j].callback(msg->topicId, data, msg->payloadSize,
+                                      msg->observers[j].userData);
+        }
+        if (!msg->isInline && msg->managed)
+          msg->managed->release();
+      }
+      if (batchSize == 1)
+        m_messagePool.release(batch[0]);
+      else
+        m_messagePool.releaseBatch(batch, batchSize);
+
+      dispatched += batchSize;
+      if (batchSize < limit)
+        break;
+    }
     return dispatched;
   }
 
   size_t dispatchAll() {
     size_t count = 0;
-    while (dispatchOne())
-      ++count;
+    for (;;) {
+      size_t n = dispatchBatch(32);
+      if (n == 0)
+        break;
+      count += n;
+    }
     return count;
   }
 

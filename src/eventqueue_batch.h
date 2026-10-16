@@ -252,8 +252,10 @@ public:
 
     if (MC_LIKELY(size <= BATCH_INLINE_MAX)) {
       msg->isInline = true;
-      if (data && size > 0)
+      if (MC_LIKELY(data != nullptr && size > 0))
         std::memcpy(msg->inlineData, data, size);
+      else if (MC_UNLIKELY(size > 0))
+        mc_detail::zeroMemoryCold(msg->inlineData, size);
     } else {
       msg->isInline = false;
       msg->managed = RefCountedPayload::create(data, size);
@@ -294,8 +296,10 @@ public:
 
     if (MC_LIKELY(size <= BATCH_INLINE_MAX)) {
       msg->isInline = true;
-      if (data && size > 0)
+      if (MC_LIKELY(data != nullptr && size > 0))
         std::memcpy(msg->inlineData, data, size);
+      else if (MC_UNLIKELY(size > 0))
+        mc_detail::zeroMemoryCold(msg->inlineData, size);
     } else {
       msg->isInline = false;
       msg->managed = RefCountedPayload::create(data, size);
@@ -336,8 +340,10 @@ public:
 
     if (MC_LIKELY(size <= BATCH_INLINE_MAX)) {
       msg->isInline = true;
-      if (data && size > 0)
+      if (MC_LIKELY(data != nullptr && size > 0))
         std::memcpy(msg->inlineData, data, size);
+      else if (MC_UNLIKELY(size > 0))
+        mc_detail::zeroMemoryCold(msg->inlineData, size);
     } else {
       msg->isInline = false;
       msg->managed = RefCountedPayload::create(data, size);
@@ -461,10 +467,8 @@ public:
           msg->managed->release();
       }
 
-      // Return messages to pool in batch
-      for (size_t i = 0; i < batchSize; ++i) {
-        m_messagePool.release(batch[i]);
-      }
+      // Return messages to pool in a single atomic CAS
+      m_messagePool.releaseBatch(batch, batchSize);
 
       totalDispatched += batchSize;
     }
@@ -474,8 +478,12 @@ public:
 
   size_t dispatchAll() {
     size_t count = 0;
-    while (dispatchOne())
-      ++count;
+    for (;;) {
+      size_t n = dispatchBatch(BATCH_SIZE);
+      if (n == 0)
+        break;
+      count += n;
+    }
     return count;
   }
 

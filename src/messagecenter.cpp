@@ -18,6 +18,9 @@
 
 // Definition for static field(s)
 MessageCenter* MessageCenter::m_instance = nullptr;
+namespace {
+std::mutex g_messageCenterSingletonMutex;
+} // namespace
 
 #ifdef _CODE_UNDER_TEST
 MessageCenterCUT* MessageCenterCUT::m_instanceCUT = nullptr;
@@ -58,6 +61,7 @@ MessageCenter::~MessageCenter()
 
 MessageCenter& MessageCenter::DefaultMessageCenter(bool autostart)
 {
+    std::lock_guard<std::mutex> lock(g_messageCenterSingletonMutex);
     if (m_instance == nullptr)
     {
         m_instance = new MessageCenter();
@@ -73,6 +77,7 @@ MessageCenter& MessageCenter::DefaultMessageCenter(bool autostart)
 
 void MessageCenter::DisposeDefaultMessageCenter()
 {
+    std::lock_guard<std::mutex> lock(g_messageCenterSingletonMutex);
     if (m_instance != nullptr)
     {
         m_instance->Stop();

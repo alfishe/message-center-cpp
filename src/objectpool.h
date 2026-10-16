@@ -103,14 +103,15 @@ public:
     return m_allocated;
   }
 
-  /// Clear the pool and delete all objects
+  /// Clear the pool and delete all idle pooled objects
   void clear() {
     std::lock_guard<std::mutex> lock(m_mutex);
+    const size_t pooledCount = m_pool.size();
     for (T *obj : m_pool) {
       delete obj;
     }
     m_pool.clear();
-    m_allocated = 0;
+    m_allocated = (m_allocated >= pooledCount) ? (m_allocated - pooledCount) : 0;
   }
 };
 

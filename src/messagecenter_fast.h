@@ -30,9 +30,8 @@ struct MessageFast {
     uint32_t size;
     alignas(alignof(std::max_align_t)) char inlineData[MC_FAST_INLINE_SIZE];
     void* managedData;
-    std::atomic<uint32_t> refCount;
 
-    MessageFast() : topicId(0), flags(0), size(0), managedData(nullptr), refCount(0) {}
+    MessageFast() : topicId(0), flags(0), size(0), managedData(nullptr) {}
 
     ~MessageFast() {
         if (managedData != nullptr) {
@@ -41,19 +40,16 @@ struct MessageFast {
         }
     }
 
-    void reset() {
-        if (managedData != nullptr) {
+    MC_FORCE_INLINE void reset() {
+        if (MC_UNLIKELY(managedData != nullptr)) {
             free(managedData);
             managedData = nullptr;
         }
-        topicId = 0;
         flags = 0;
-        size = 0;
-        refCount.store(0, std::memory_order_relaxed);
     }
 
-    const void* data() const {
-        return (flags & 1) ? managedData : inlineData;
+    MC_FORCE_INLINE const void* data() const {
+        return MC_UNLIKELY(flags & 1) ? managedData : inlineData;
     }
 };
 
@@ -109,12 +105,17 @@ private:
     std::atomic<uint64_t> m_dispatched{0};
     char m_padDispatched[64 - sizeof(std::atomic<uint64_t>)];
 
-    inline TopicSlot* findTopic(uint16_t topicId) const {
-        if (topicId < TOPIC_CHUNK_SIZE)
+    MC_FORCE_INLINE TopicSlot* findTopic(uint16_t topicId) const {
+        if (MC_LIKELY(topicId < TOPIC_CHUNK_SIZE))
             return &m_topicBase[topicId];
         TopicSlot* chunk = m_topicChunks[topicId >> TOPIC_CHUNK_SHIFT].load(
             std::memory_order_acquire);
         return chunk ? &chunk[topicId & TOPIC_CHUNK_MASK] : nullptr;
+    }
+
+    static std::mutex& singletonMutex() {
+        static std::mutex s_mutex;
+        return s_mutex;
     }
 
     TopicSlot& ensureTopic(uint16_t topicId) {
@@ -135,6 +136,7 @@ private:
 
 public:
     static MessageCenterFast& DefaultMessageCenter(bool autostart = true) {
+        std::lock_guard<std::mutex> lock(singletonMutex());
         if (s_instance == nullptr) {
             s_instance = new MessageCenterFast();
             if (autostart) {
@@ -145,6 +147,7 @@ public:
     }
 
     static void DisposeDefaultMessageCenter() {
+        std::lock_guard<std::mutex> lock(singletonMutex());
         if (s_instance != nullptr) {
             s_instance->stop();
             delete s_instance;
@@ -283,33 +286,42 @@ public:
     }
 
     bool post(uint16_t topicId, const void* data, size_t size) {
-        if (topicId >= MC_FAST_MAX_TOPICS) return false;
-        if (size > MC_FAST_INLINE_SIZE && m_queue.full() &&
+        if (MC_UNLIKELY(topicId >= MC_FAST_MAX_TOPICS)) return false;
+        if (MC_UNLIKELY(size > MC_FAST_INLINE_SIZE) && m_queue.full() &&
             (!m_running.load(std::memory_order_relaxed) ||
              m_stopping.load(std::memory_order_relaxed))) {
             return false;
         }
 
         MessageFast* msg = m_pool.acquire();
-        if (msg == nullptr) return false;
+        if (MC_UNLIKELY(msg == nullptr)) return false;
 
         msg->topicId = topicId;
         msg->size = static_cast<uint32_t>(size);
 
-        if (size <= MC_FAST_INLINE_SIZE) {
+        if (MC_LIKELY(size <= MC_FAST_INLINE_SIZE)) {
             msg->flags = 0;
-            if (data && size > 0) {
+            if (MC_LIKELY(data != nullptr && size > 0)) {
                 memcpy(msg->inlineData, data, size);
+            } else if (MC_UNLIKELY(size > 0)) {
+                mc_detail::zeroMemoryCold(msg->inlineData, size);
             }
         } else {
             msg->flags = 1;
             msg->managedData = malloc(size);
-            if (msg->managedData && data) {
+            if (MC_UNLIKELY(!msg->managedData)) {
+                msg->flags = 0;
+                m_pool.release(msg);
+                return false;
+            }
+            if (MC_LIKELY(data != nullptr)) {
                 memcpy(msg->managedData, data, size);
+            } else {
+                mc_detail::zeroMemoryCold(msg->managedData, size);
             }
         }
 
-        if (!m_queue.try_push(msg)) {
+        if (MC_UNLIKELY(!m_queue.try_push(msg))) {
             bool pushed = false;
             if (size > MC_FAST_INLINE_SIZE &&
                 m_running.load(std::memory_order_relaxed) &&
@@ -331,7 +343,7 @@ public:
         }
 
         m_posted.fetch_add(1, std::memory_order_seq_cst);
-        if (m_sleeping.load(std::memory_order_seq_cst)) {
+        if (MC_UNLIKELY(m_sleeping.load(std::memory_order_seq_cst))) {
             // Rare path: the worker is (about to be) blocked on m_cv.
             // Taking m_cvMutex serializes with the worker's predicate check, so the
             // notification cannot fall between "queue is empty" and "block on m_cv"
@@ -352,36 +364,45 @@ public:
 
     // Non-blocking variant: returns false immediately if the ring buffer is full
     bool tryPost(uint16_t topicId, const void* data, size_t size) {
-        if (topicId >= MC_FAST_MAX_TOPICS) return false;
-        if (m_queue.full()) return false;
+        if (MC_UNLIKELY(topicId >= MC_FAST_MAX_TOPICS)) return false;
+        if (MC_UNLIKELY(m_queue.full())) return false;
 
         MessageFast* msg = m_pool.acquire();
-        if (msg == nullptr) return false;
+        if (MC_UNLIKELY(msg == nullptr)) return false;
 
         msg->topicId = topicId;
         msg->size = static_cast<uint32_t>(size);
 
-        if (size <= MC_FAST_INLINE_SIZE) {
+        if (MC_LIKELY(size <= MC_FAST_INLINE_SIZE)) {
             msg->flags = 0;
-            if (data && size > 0) {
+            if (MC_LIKELY(data != nullptr && size > 0)) {
                 memcpy(msg->inlineData, data, size);
+            } else if (MC_UNLIKELY(size > 0)) {
+                mc_detail::zeroMemoryCold(msg->inlineData, size);
             }
         } else {
             msg->flags = 1;
             msg->managedData = malloc(size);
-            if (msg->managedData && data) {
+            if (MC_UNLIKELY(!msg->managedData)) {
+                msg->flags = 0;
+                m_pool.release(msg);
+                return false;
+            }
+            if (MC_LIKELY(data != nullptr)) {
                 memcpy(msg->managedData, data, size);
+            } else {
+                mc_detail::zeroMemoryCold(msg->managedData, size);
             }
         }
 
-        if (!m_queue.try_push(msg)) {
+        if (MC_UNLIKELY(!m_queue.try_push(msg))) {
             msg->reset();
             m_pool.release(msg);
             return false;
         }
 
         m_posted.fetch_add(1, std::memory_order_seq_cst);
-        if (m_sleeping.load(std::memory_order_seq_cst)) {
+        if (MC_UNLIKELY(m_sleeping.load(std::memory_order_seq_cst))) {
             { std::lock_guard<std::mutex> lock(m_cvMutex); }
             m_cv.notify_one();
         }
@@ -460,16 +481,26 @@ public:
 
 private:
     void dispatchLoop() {
+        static constexpr size_t WORKER_BATCH_SIZE = 32;
+        MessageFast* batch[WORKER_BATCH_SIZE];
         int emptyCount = 0;
 
         while (!m_stopping.load(std::memory_order_acquire)) {
-            MessageFast* msg = nullptr;
+            size_t batchSize = 0;
+            while (batchSize < WORKER_BATCH_SIZE) {
+                MessageFast* msg = nullptr;
+                if (!m_queue.try_pop(msg) || !msg)
+                    break;
+                batch[batchSize++] = msg;
+            }
 
-            if (m_queue.try_pop(msg)) {
-                dispatch(msg);
-                msg->reset();
-                m_pool.release(msg);
-                m_dispatched.fetch_add(1, std::memory_order_relaxed);
+            if (batchSize > 0) {
+                for (size_t i = 0; i < batchSize; ++i) {
+                    dispatch(batch[i]);
+                    batch[i]->reset();
+                }
+                m_pool.releaseBatch(batch, batchSize);
+                m_dispatched.fetch_add(batchSize, std::memory_order_relaxed);
                 emptyCount = 0;
             } else {
                 emptyCount++;
@@ -486,16 +517,26 @@ private:
             }
         }
 
-        MessageFast* msg = nullptr;
-        while (m_queue.try_pop(msg)) {
-            dispatch(msg);
-            msg->reset();
-            m_pool.release(msg);
-            m_dispatched.fetch_add(1, std::memory_order_relaxed);
+        for (;;) {
+            size_t batchSize = 0;
+            while (batchSize < WORKER_BATCH_SIZE) {
+                MessageFast* msg = nullptr;
+                if (!m_queue.try_pop(msg) || !msg)
+                    break;
+                batch[batchSize++] = msg;
+            }
+            if (batchSize == 0)
+                break;
+            for (size_t i = 0; i < batchSize; ++i) {
+                dispatch(batch[i]);
+                batch[i]->reset();
+            }
+            m_pool.releaseBatch(batch, batchSize);
+            m_dispatched.fetch_add(batchSize, std::memory_order_relaxed);
         }
     }
 
-    void dispatch(MessageFast* msg) {
+    MC_FORCE_INLINE void dispatch(MessageFast* msg) {
         if (msg == nullptr || msg->topicId >= MC_FAST_MAX_TOPICS) return;
 
         const void* data = msg->data();

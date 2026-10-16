@@ -57,6 +57,15 @@
   #define MC_UNLIKELY(x) (x)
 #endif
 
+#include <cstddef>
+#include <cstring>
+
+namespace mc_detail {
+MC_NOINLINE inline void zeroMemoryCold(void* dst, size_t size) {
+  std::memset(dst, 0, size);
+}
+} // namespace mc_detail
+
 // Thread-local storage
 // Note: C++11 thread_local is supported by all modern compilers
 // MSVC 2015+, GCC 4.8+, Clang 3.3+
